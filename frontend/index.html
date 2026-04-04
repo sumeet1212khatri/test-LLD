@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Uber LLD — Simulation Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0f0f0f;
+      --bg2: #151515;
+      --glass: rgba(255, 255, 255, 0.06);
+      --glass2: rgba(255, 255, 255, 0.1);
+      --border: rgba(255, 255, 255, 0.12);
+      --text: #f5f5f5;
+      --muted: #9ca3af;
+      --green: #00c853;
+      --red: #ff3b30;
+      --amber: #ffcc00;
+      --accent: #276ef1;
+      --shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: radial-gradient(1200px 600px at 10% -10%, #1a1a2e 0%, var(--bg) 55%),
+                  radial-gradient(900px 500px at 100% 0%, #0d1b2a 0%, var(--bg) 50%);
+      color: var(--text);
+      font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .shell {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 28px 20px 48px;
+    }
+
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .logo {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: linear-gradient(145deg, #111, #222);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    .logo::after {
+      content: "";
+      position: absolute;
+      inset: -40%;
+      background: conic-gradient(from 210deg, #276ef1, #00c853, #ffcc00, #276ef1);
+      opacity: 0.35;
+      animation: spin 8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    h1 {
+      margin: 0;
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: var(--glass);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(14px);
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 12px rgba(0, 200, 83, 0.7);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.6; transform: scale(0.9); }
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+    @media (max-width: 1024px) {
+      .grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 520px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    .card {
+      border-radius: 16px;
+      padding: 18px 18px 16px;
+      background: linear-gradient(160deg, var(--glass2), var(--glass));
+      border: 1px solid var(--border);
+      backdrop-filter: blur(18px);
+      box-shadow: var(--shadow);
+      transform: translateY(0);
+      transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.35s;
+    }
+    .card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .card-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .card-value {
+      font-size: 1.65rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+    .card-hint {
+      margin-top: 6px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .panel {
+      border-radius: 18px;
+      padding: 20px;
+      background: linear-gradient(165deg, rgba(255,255,255,0.07), rgba(255,255,255,0.03));
+      border: 1px solid var(--border);
+      backdrop-filter: blur(20px);
+      box-shadow: var(--shadow);
+      margin-bottom: 20px;
+    }
+    .panel h2 {
+      margin: 0 0 16px;
+      font-size: 1rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .chart {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      height: 180px;
+      padding: 8px 4px 0;
+    }
+    .bar-wrap {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 8px;
+    }
+    .bar {
+      width: 100%;
+      max-width: 36px;
+      border-radius: 8px 8px 4px 4px;
+      background: linear-gradient(180deg, #6ea8ff, var(--accent));
+      height: 0%;
+      transition: height 0.9s cubic-bezier(0.2, 0.85, 0.2, 1);
+      box-shadow: 0 4px 18px rgba(39, 110, 241, 0.35);
+      position: relative;
+      overflow: hidden;
+    }
+    .bar::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, rgba(255,255,255,0.25), transparent 55%);
+      opacity: 0.7;
+    }
+    .bar-label {
+      font-size: 0.65rem;
+      color: var(--muted);
+    }
+
+    .map-panel {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      gap: 18px;
+    }
+    @media (max-width: 900px) {
+      .map-panel { grid-template-columns: 1fr; }
+    }
+
+    .map {
+      display: grid;
+      grid-template-columns: repeat(24, 1fr);
+      gap: 4px;
+      padding: 14px;
+      border-radius: 14px;
+      background: radial-gradient(circle at 30% 20%, rgba(39, 110, 241, 0.12), transparent 45%),
+                  #0b0b0b;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      min-height: 280px;
+      align-content: start;
+    }
+
+    .cell {
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      transform: scale(0.85);
+      opacity: 0.35;
+      transition: transform 0.5s ease, opacity 0.5s ease, background 0.5s ease, box-shadow 0.5s ease;
+    }
+    .cell.on {
+      opacity: 1;
+      transform: scale(1);
+    }
+    .cell.normal {
+      background: radial-gradient(circle at 30% 25%, rgba(0, 200, 83, 0.95), rgba(0, 120, 60, 0.9));
+      box-shadow: 0 0 14px rgba(0, 200, 83, 0.35);
+    }
+    .cell.surge {
+      background: radial-gradient(circle at 30% 25%, rgba(255, 80, 70, 0.95), rgba(180, 30, 30, 0.95));
+      box-shadow: 0 0 16px rgba(255, 80, 70, 0.45);
+    }
+
+    .legend {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px solid var(--border);
+    }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 10px 0;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+    }
+    .swatch.green { background: var(--green); }
+    .swatch.red { background: var(--red); }
+
+    footer {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-align: center;
+    }
+
+    .fade-in {
+      animation: fadeIn 0.8s ease both;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="fade-in">
+      <div class="brand">
+        <div class="logo" aria-hidden="true"></div>
+        <div>
+          <h1>Simulation Command Center</h1>
+          <p class="subtitle">Uber LLD engine · live metrics from <code>simulation_metrics.js</code></p>
+        </div>
+      </div>
+      <div class="pill"><span class="dot"></span> Engine linked · ThreadPool · Strategy pricing</div>
+    </header>
+
+    <section class="grid fade-in" aria-label="Key metrics">
+      <article class="card">
+        <div class="card-label">Total rides</div>
+        <div class="card-value" id="m-total">0</div>
+        <div class="card-hint">Planned simulation volume</div>
+      </article>
+      <article class="card">
+        <div class="card-label">Avg wait</div>
+        <div class="card-value"><span id="m-wait">0.0</span> <span style="font-size:1rem;font-weight:600;color:var(--muted)">min</span></div>
+        <div class="card-hint">Match → dispatch latency</div>
+      </article>
+      <article class="card">
+        <div class="card-label">Driver utilization</div>
+        <div class="card-value"><span id="m-util">0</span>%</div>
+        <div class="card-hint">Busy time / capacity</div>
+      </article>
+      <article class="card">
+        <div class="card-label">Surge events</div>
+        <div class="card-value" id="m-surge">0</div>
+        <div class="card-hint">Rides priced with surge</div>
+      </article>
+      <article class="card">
+        <div class="card-label">Avg fare</div>
+        <div class="card-value">₹<span id="m-fare">0.00</span></div>
+        <div class="card-hint">Completed trips only</div>
+      </article>
+    </section>
+
+    <section class="panel fade-in">
+      <h2>Rides per minute</h2>
+      <div class="chart" id="rpm-chart" role="img" aria-label="Rides per minute bar chart"></div>
+    </section>
+
+    <section class="panel fade-in">
+      <h2>Driver map · Bangalore grid</h2>
+      <div class="map-panel">
+        <div class="map" id="driver-map" aria-label="Driver dot grid"></div>
+        <div class="legend">
+          <div style="font-weight:600;margin-bottom:6px;color:var(--text);">Legend</div>
+          <div class="legend-row"><span class="swatch green"></span> Normal demand</div>
+          <div class="legend-row"><span class="swatch red"></span> Surge zone</div>
+          <p style="font-size:0.8rem;line-height:1.5;color:var(--muted);margin-top:12px;">
+            Dots are sampled driver positions (lat 12.9–13.1, lng 77.5–77.7). Red highlights are simulated surge hotspots for visualization.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      Run <code>./uber_engine</code> from the CMake build directory to regenerate <code>simulation_metrics.js</code>, then refresh this page.
+    </footer>
+  </div>
+
+  <script src="simulation_metrics.js"></script>
+  <script>
+    (function () {
+      const DEFAULT = {
+        totalRides: 0,
+        completed: 0,
+        cancelled: 0,
+        avgWaitMinutes: 0,
+        driverUtilization: 0,
+        surgeEvents: 0,
+        avgFare: 0,
+        simulationWallSeconds: 0,
+        ridesPerMinute: [],
+        driverDots: []
+      };
+
+      const data = window.UBER_SIM_METRICS || DEFAULT;
+
+      function formatInt(n) {
+        return Math.round(n).toLocaleString();
+      }
+
+      document.getElementById("m-total").textContent = formatInt(data.totalRides || 0);
+      document.getElementById("m-wait").textContent = (data.avgWaitMinutes || 0).toFixed(1);
+      document.getElementById("m-util").textContent = formatInt(data.driverUtilization || 0);
+      document.getElementById("m-surge").textContent = formatInt(data.surgeEvents || 0);
+      document.getElementById("m-fare").textContent = (data.avgFare || 0).toFixed(2);
+
+      const chart = document.getElementById("rpm-chart");
+      const rpm = Array.isArray(data.ridesPerMinute) ? data.ridesPerMinute : [];
+      let maxR = 1;
+      if (rpm.length) {
+        maxR = Math.max(1, Math.max.apply(null, rpm));
+      }
+
+      rpm.forEach(function (count, idx) {
+        const wrap = document.createElement("div");
+        wrap.className = "bar-wrap";
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        const pct = maxR > 0 ? (count / maxR) * 100 : 0;
+        setTimeout(function () {
+          bar.style.height = pct + "%";
+        }, 80 + idx * 40);
+        const lab = document.createElement("div");
+        lab.className = "bar-label";
+        lab.textContent = "m" + idx;
+        wrap.appendChild(bar);
+        wrap.appendChild(lab);
+        chart.appendChild(wrap);
+      });
+
+      const mapEl = document.getElementById("driver-map");
+      const cells = 24 * 10;
+      const dots = Array.isArray(data.driverDots) ? data.driverDots : [];
+
+      function normLat(lat) {
+        return (lat - 12.9) / (13.1 - 12.9);
+      }
+      function normLng(lng) {
+        return (lng - 77.5) / (77.7 - 77.5);
+      }
+
+      for (let i = 0; i < cells; i++) {
+        const cell = document.createElement("div");
+        cell.className = "cell";
+        mapEl.appendChild(cell);
+      }
+
+      const allCells = mapEl.querySelectorAll(".cell");
+      dots.forEach(function (d, i) {
+        const lat = typeof d.lat === "number" ? d.lat : 12.95;
+        const lng = typeof d.lng === "number" ? d.lng : 77.6;
+        const surge = !!d.surge;
+        const x = Math.floor(normLng(lng) * 23.999);
+        const y = Math.floor((1 - normLat(lat)) * 9.999);
+        const idx = y * 24 + x;
+        if (idx >= 0 && idx < allCells.length) {
+          const c = allCells[idx];
+          c.classList.add("on", surge ? "surge" : "normal");
+        }
+      });
+
+      if (!dots.length) {
+        for (let i = 0; i < Math.min(40, allCells.length); i++) {
+          const c = allCells[i];
+          c.classList.add("on", "normal");
+        }
+      }
+    })();
+  </script>
+</body>
+</html>
