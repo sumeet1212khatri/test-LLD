@@ -18,7 +18,7 @@ Production-style low-level design for a ride-hailing core: domain models, pricin
 ┌───────────────┐   ┌────────────────┐   ┌──────────────────┐
 │ ThreadPool    │   │ RideSimulator  │   │ MetricsCollector │
 │ (worker pool) │   │ (Bangalore sim)│   │ (singleton stats)│
-└───────┬───────┘   └───────┬────────┘   └────────┬───────────┘
+└───────┬───────┘   └───────┬────────┘   └────────┬─────────┘
         │                   │                     │
         │                   ▼                     │
         │           ┌─────────────────┐           │
@@ -29,12 +29,12 @@ Production-style low-level design for a ride-hailing core: domain models, pricin
         ▼                    ▼                    ▼
 ┌───────────────┐   ┌───────────────┐    ┌───────────────┐
 │ RiderService  │   │ MatchingEngine│    │ PricingEngine │
-│ DriverService │   │ + selectors │    │ + strategies  │
+│ DriverService │   │ + selectors │    │ + strategies    │
 └───────────────┘   └───────────────┘    └───────────────┘
         │                    │                    │
         ▼                    ▼                    ▼
 ┌───────────────────────────────────────────────────────┐
-│ Models: Rider, Driver, Ride, Location, Payment       │
+│ Models: Rider, Driver, Ride, Location, Payment        │
 │ State: RideStateMachine · Concurrency: RideLock        │
 └───────────────────────────────────────────────────────┘
 ```
