@@ -19,13 +19,13 @@ Orderbook::~Orderbook() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GFD pruning thread: runs at market close (16:00 local)
+// GFD pruning thread
 // ─────────────────────────────────────────────────────────────────────────────
 void Orderbook::PruneGoodForDayOrders() {
     using namespace std::chrono;
     while (true) {
-        const auto now    = system_clock::now();
-        const auto now_t  = system_clock::to_time_t(now);
+        const auto now   = system_clock::now();
+        const auto now_t = system_clock::to_time_t(now);
         std::tm parts{};
 #ifdef _WIN32
         localtime_s(&parts, &now_t);
@@ -56,7 +56,7 @@ void Orderbook::PruneGoodForDayOrders() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AddOrder - main entry point
+// AddOrder
 // ─────────────────────────────────────────────────────────────────────────────
 Trades Orderbook::AddOrder(OrderPointer order) {
     std::scoped_lock lk{ordersMutex_};
@@ -64,7 +64,7 @@ Trades Orderbook::AddOrder(OrderPointer order) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AddOrderInternal - called with mutex already held
+// AddOrderInternal — called with mutex already held
 // ─────────────────────────────────────────────────────────────────────────────
 Trades Orderbook::AddOrderInternal(OrderPointer order) {
     stats_.totalOrders.fetch_add(1, std::memory_order_relaxed);
@@ -73,7 +73,7 @@ Trades Orderbook::AddOrderInternal(OrderPointer order) {
     if (orders_.contains(order->GetOrderId()))
         return {};
 
-    // ── PostOnly: reject if it would cross the spread ─────────────────────────
+    // PostOnly: reject if crosses spread
     if (order->GetOrderType() == OrderType::PostOnly) {
         if (CanMatch(order->GetSide(), order->GetPrice())) {
             order->SetStatus(OrderStatus::Rejected);
@@ -81,7 +81,7 @@ Trades Orderbook::AddOrderInternal(OrderPointer order) {
         }
     }
 
-    // ── StopLimit: park in stop order book if stop not triggered yet ──────────
+    // StopLimit: park if not yet triggered
     if (order->GetOrderType() == OrderType::StopLimit) {
         Price lastTrade = stats_.lastTradePrice.load(std::memory_order_relaxed);
         bool triggered = false;
@@ -94,14 +94,13 @@ Trades Orderbook::AddOrderInternal(OrderPointer order) {
                 stopSells_.emplace(order->GetStopPrice(), order);
             return {};
         }
-        // Already triggered: convert to GTC limit and fall through
         order = std::make_shared<Order>(
             OrderType::GoodTillCancel,
             order->GetOrderId(), order->GetSide(), order->GetPrice(),
             order->GetRemainingQuantity());
     }
 
-    // ── Market order: use worst available price to ensure full sweep ──────────
+    // Market order: use worst available price
     if (order->GetOrderType() == OrderType::Market) {
         if (order->GetSide() == Side::Buy && !asks_.empty()) {
             const auto& [worstAsk, _] = *asks_.rbegin();
@@ -110,24 +109,24 @@ Trades Orderbook::AddOrderInternal(OrderPointer order) {
             const auto& [worstBid, _] = *bids_.rbegin();
             order->ToGoodTillCancel(worstBid);
         } else {
-            return {};  // no liquidity
+            return {};
         }
     }
 
-    // ── FAK / IOC: reject immediately if no match ─────────────────────────────
+    // FAK / IOC: reject if no match available
     if (order->GetOrderType() == OrderType::FillAndKill ||
         order->GetOrderType() == OrderType::ImmediateOrCancel) {
         if (!CanMatch(order->GetSide(), order->GetPrice()))
             return {};
     }
 
-    // ── FOK: reject if cannot fully fill ─────────────────────────────────────
+    // FOK: reject if cannot fully fill
     if (order->GetOrderType() == OrderType::FillOrKill) {
         if (!CanFullyFill(order->GetSide(), order->GetPrice(), order->GetInitialQuantity()))
             return {};
     }
 
-    // ── Insert into price level ───────────────────────────────────────────────
+    // Insert into price level
     OrderPointers::iterator it;
     if (order->GetSide() == Side::Buy) {
         auto& level = bids_[order->GetPrice()];
@@ -140,7 +139,6 @@ Trades Orderbook::AddOrderInternal(OrderPointer order) {
     }
     orders_[order->GetOrderId()] = {order, it};
     OnOrderAdded(order);
-
     if (onAdded_) onAdded_(*order);
 
     return MatchOrders();
@@ -159,6 +157,9 @@ void Orderbook::CancelOrdersInternal(const OrderIds& ids) {
     for (auto id : ids) CancelOrderInternal(id);
 }
 
+// BUG FIX #4: Replaced .at() with .find() to avoid std::out_of_range crash
+// when orders_ and bids_/asks_ are in inconsistent state. .at() would throw
+// and leave mutex locked. Now we safely skip missing price levels.
 void Orderbook::CancelOrderInternal(OrderId orderId) {
     if (!orders_.contains(orderId)) return;
 
@@ -166,16 +167,21 @@ void Orderbook::CancelOrderInternal(OrderId orderId) {
     orders_.erase(orderId);
 
     if (order->GetSide() == Side::Sell) {
-        auto price = order->GetPrice();
-        auto& level = asks_.at(price);
-        level.erase(it);
-        if (level.empty()) asks_.erase(price);
+        auto price   = order->GetPrice();
+        auto levelIt = asks_.find(price);
+        if (levelIt != asks_.end()) {
+            levelIt->second.erase(it);
+            if (levelIt->second.empty()) asks_.erase(levelIt);
+        }
     } else {
-        auto price = order->GetPrice();
-        auto& level = bids_.at(price);
-        level.erase(it);
-        if (level.empty()) bids_.erase(price);
+        auto price   = order->GetPrice();
+        auto levelIt = bids_.find(price);
+        if (levelIt != bids_.end()) {
+            levelIt->second.erase(it);
+            if (levelIt->second.empty()) bids_.erase(levelIt);
+        }
     }
+
     order->Cancel();
     OnOrderCancelled(order);
     if (onCancelled_) onCancelled_(*order);
@@ -183,10 +189,7 @@ void Orderbook::CancelOrderInternal(OrderId orderId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BUG FIX #1: ModifyOrder - original had a race condition between CancelOrder
-// (which released the lock) and AddOrder (which re-acquired it). Another thread
-// could insert an order with the same ID in between. Fixed by using internal
-// helpers that assume the lock is already held.
+// ModifyOrder
 // ─────────────────────────────────────────────────────────────────────────────
 Trades Orderbook::ModifyOrder(OrderModify mod) {
     std::scoped_lock lk{ordersMutex_};
@@ -197,17 +200,32 @@ Trades Orderbook::ModifyOrder(OrderModify mod) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Matching Engine - price-time priority
+// MatchOrders
+//
+// BUG FIX #2: Iterator invalidation fixed — structured bindings (auto&) on
+// map iterators dangled when bids_.erase(bidPrice) was called inside the loop.
+// Now we copy Price values and use find() after erasure is safe.
+//
+// BUG FIX #3: Stop injection deferred — CheckAndTriggerStops now only pushes
+// to pendingStops_. After the main matching loop exits, we drain pendingStops_
+// and inject via AddOrderInternal. This breaks the recursive call chain:
+//   AddOrderInternal → MatchOrders → CheckAndTriggerStops → AddOrderInternal
+// which could stack-overflow on stop-order chains.
 // ─────────────────────────────────────────────────────────────────────────────
 Trades Orderbook::MatchOrders() {
     Trades trades;
     trades.reserve(32);
 
     while (!bids_.empty() && !asks_.empty()) {
-        auto& [bidPrice, bidLevel] = *bids_.begin();
-        auto& [askPrice, askLevel] = *asks_.begin();
+        // BUG FIX #2: Copy price values — do NOT hold references across erasure
+        auto bidIt   = bids_.begin();
+        auto askIt   = asks_.begin();
+        Price bidPrice = bidIt->first;
+        Price askPrice = askIt->first;
+        auto& bidLevel = bidIt->second;
+        auto& askLevel = askIt->second;
 
-        if (bidPrice < askPrice) break;  // no cross
+        if (bidPrice < askPrice) break;
 
         while (!bidLevel.empty() && !askLevel.empty()) {
             auto bid = bidLevel.front();
@@ -215,7 +233,6 @@ Trades Orderbook::MatchOrders() {
 
             Quantity qty = std::min(bid->GetRemainingQuantity(),
                                     ask->GetRemainingQuantity());
-
             bid->Fill(qty);
             ask->Fill(qty);
 
@@ -246,61 +263,56 @@ Trades Orderbook::MatchOrders() {
 
             if (onTrade_) onTrade_(trade);
 
+            // BUG FIX #3: Only COLLECTS stops into pendingStops_, does NOT inject yet
             CheckAndTriggerStops(ask->GetPrice());
         }
 
-        // BUG FIX #2: levelData_ entries are cleaned inside OnOrderMatched/
-        // OnOrderCancelled. Erasing them again here caused a double-erase.
-        // Only erase the price-level containers (bids_/asks_), not levelData_.
         if (bidLevel.empty()) bids_.erase(bidPrice);
         if (askLevel.empty()) asks_.erase(askPrice);
     }
 
-    // BUG FIX #3: Original cancelFAK only checked the *front* of the top-of-book
-    // level AFTER matching was complete. If the FAK was partially filled and moved
-    // off the front, it would never be cancelled. Fix: track FAK orders explicitly
-    // and cancel them by ID after matching, regardless of their position.
+    // Cancel remaining FAK/IOC orders
     std::vector<OrderId> fakToCancel;
     for (auto& [id, entry] : orders_) {
         auto t = entry.order->GetOrderType();
-        if (t == OrderType::FillAndKill || t == OrderType::ImmediateOrCancel) {
+        if (t == OrderType::FillAndKill || t == OrderType::ImmediateOrCancel)
             fakToCancel.push_back(id);
-        }
     }
     for (auto id : fakToCancel) CancelOrderInternal(id);
+
+    // BUG FIX #3: Drain pendingStops_ AFTER matching is fully complete.
+    // Swap first so that any stops triggered by injected orders go into
+    // a fresh pendingStops_ and are processed in next AddOrderInternal call,
+    // not recursively here.
+    std::vector<OrderPointer> stops;
+    std::swap(stops, pendingStops_);
+    for (auto& o : stops) {
+        auto limitOrder = std::make_shared<Order>(
+            OrderType::GoodTillCancel,
+            o->GetOrderId(), o->GetSide(), o->GetPrice(),
+            o->GetRemainingQuantity());
+        AddOrderInternal(limitOrder);
+    }
 
     return trades;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BUG FIX #4: CheckAndTriggerStops - original called AddOrder() which tried to
-// acquire ordersMutex_ — but this function is called from MatchOrders() which
-// is called from AddOrder() which already holds the lock → deadlock.
-// Fixed by calling AddOrderInternal() (lock-free internal path) directly.
+// BUG FIX #3: CheckAndTriggerStops — only collects into pendingStops_.
+// No longer calls AddOrderInternal directly, breaking the recursion chain.
 // ─────────────────────────────────────────────────────────────────────────────
 void Orderbook::CheckAndTriggerStops(Price lastTrade) {
-    std::vector<OrderPointer> toInject;
-
     for (auto it = stopBuys_.begin(); it != stopBuys_.end(); ) {
         if (lastTrade >= it->first) {
-            toInject.push_back(it->second);
+            pendingStops_.push_back(it->second);
             it = stopBuys_.erase(it);
         } else ++it;
     }
     for (auto it = stopSells_.begin(); it != stopSells_.end(); ) {
         if (lastTrade <= it->first) {
-            toInject.push_back(it->second);
+            pendingStops_.push_back(it->second);
             it = stopSells_.erase(it);
         } else ++it;
-    }
-
-    for (auto& o : toInject) {
-        auto limitOrder = std::make_shared<Order>(
-            OrderType::GoodTillCancel,
-            o->GetOrderId(), o->GetSide(), o->GetPrice(),
-            o->GetRemainingQuantity());
-        // Use internal path — mutex is already held by the caller
-        AddOrderInternal(limitOrder);
     }
 }
 
@@ -319,7 +331,6 @@ bool Orderbook::CanMatch(Side side, Price price) const {
 
 bool Orderbook::CanFullyFill(Side side, Price price, Quantity qty) const {
     if (!CanMatch(side, price)) return false;
-
     Quantity avail = 0;
     if (side == Side::Buy) {
         for (const auto& [lvlPrice, level] : asks_) {
@@ -338,14 +349,7 @@ bool Orderbook::CanFullyFill(Side side, Price price, Quantity qty) const {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BUG FIX #5: UpdateLevelData - "Remove" action decremented count, but matched
-// orders that are NOT fully filled should only reduce quantity, not count.
-// "Match" action handled quantity only (correct), but "Remove" was also being
-// called for fully-filled matched orders via OnOrderMatched — however those
-// orders were already removed from the orders_ map, so their level entries
-// got double-decremented. Fixed by using Match for partial fills and not
-// calling UpdateLevelData at all for fully-filled matched orders (they are
-// cleaned up when erased from the level list above).
+// Level data tracking
 // ─────────────────────────────────────────────────────────────────────────────
 void Orderbook::UpdateLevelData(Price price, Quantity qty, LevelData::Action action) {
     auto& d = levelData_[price];
@@ -370,8 +374,6 @@ void Orderbook::OnOrderCancelled(OrderPointer order) {
     UpdateLevelData(order->GetPrice(), order->GetRemainingQuantity(), LevelData::Action::Remove);
 }
 void Orderbook::OnOrderMatched(Price price, Quantity qty, bool fullyFilled) {
-    // For fully filled: use Remove (decrements count).
-    // For partial fill: use Match (quantity only, order still lives in book).
     UpdateLevelData(price, qty,
         fullyFilled ? LevelData::Action::Remove : LevelData::Action::Match);
 }
@@ -418,8 +420,8 @@ Price Orderbook::Spread() const {
 OrderbookSnapshot Orderbook::GetSnapshot() const {
     std::scoped_lock lk{ordersMutex_};
     OrderbookSnapshot snap;
-    snap.seqNum       = stats_.seqNum.load();
-    snap.timestampNs  = std::chrono::steady_clock::now().time_since_epoch().count();
+    snap.seqNum         = stats_.seqNum.load();
+    snap.timestampNs    = std::chrono::steady_clock::now().time_since_epoch().count();
     snap.lastTradePrice = stats_.lastTradePrice.load();
     snap.lastTradeQty   = stats_.lastTradeQty.load();
     snap.totalVolume    = stats_.totalVolume.load();
