@@ -2,12 +2,12 @@
 #include "Types.h"
 #include <memory>
 #include <stdexcept>
-#include <format>
+#include <string>   // <-- Yahan <format> hata kar <string> lagaya
 #include <chrono>
 
 /**
  * @brief HFT-grade Order with all order types including Iceberg, StopLimit, PostOnly.
- *        Minimizes memory footprint (cache-line friendly) and avoids virtual dispatch.
+ * Minimizes memory footprint (cache-line friendly) and avoids virtual dispatch.
  */
 class Order {
 public:
@@ -56,8 +56,9 @@ public:
     // ─── Mutators ────────────────────────────────────────────────────────────────
     void Fill(Quantity qty) {
         if (qty > remainingQty_) [[unlikely]]
-            throw std::logic_error(std::format(
-                "Order {} cannot fill {} > remaining {}", orderId_, qty, remainingQty_));
+            // <-- Yahan std::format ki jagah simple string concatenation use kiya hai
+            throw std::logic_error("Order " + std::to_string(orderId_) + " cannot fill " + std::to_string(qty) + " > remaining " + std::to_string(remainingQty_));
+        
         remainingQty_ -= qty;
         // Iceberg: replenish display quantity from hidden reserve
         if (IsIceberg()) {
@@ -80,8 +81,9 @@ public:
 
     void ToGoodTillCancel(Price price) {
         if (orderType_ != OrderType::Market) [[unlikely]]
-            throw std::logic_error(std::format(
-                "Order {} is not Market type, cannot convert to GTC", orderId_));
+            // <-- Yahan bhi std::format hata diya hai
+            throw std::logic_error("Order " + std::to_string(orderId_) + " is not Market type, cannot convert to GTC");
+        
         price_     = price;
         orderType_ = OrderType::GoodTillCancel;
     }
