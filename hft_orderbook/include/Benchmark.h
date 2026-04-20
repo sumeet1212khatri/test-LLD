@@ -62,16 +62,16 @@ struct BenchmarkResult {
         o << "  \"tradesPerSecond\": " << tradesPerSecond << ",\n";
         o << "  \"wallTimeSeconds\": " << wallTimeSeconds << ",\n";
         o << "  \"latency\": {\n";
-        o << "    \"avgNs\": "    << avgLatencyNs  << ",\n";
-        o << "    \"minNs\": "    << minLatencyNs  << ",\n";
-        o << "    \"maxNs\": "    << maxLatencyNs  << ",\n";
-        o << "    \"stdDevNs\": " << stdDevNs      << ",\n";
-        o << "    \"p50Ns\": "    << p50LatencyNs  << ",\n";
-        o << "    \"p90Ns\": "    << p90LatencyNs  << ",\n";
-        o << "    \"p95Ns\": "    << p95LatencyNs  << ",\n";
-        o << "    \"p99Ns\": "    << p99LatencyNs  << ",\n";
-        o << "    \"p999Ns\": "   << p999LatencyNs << ",\n";
-        o << "    \"p9999Ns\": "  << p9999LatencyNs<< "\n";
+        o << "    \"avgNs\": "    << avgLatencyNs   << ",\n";
+        o << "    \"minNs\": "    << minLatencyNs   << ",\n";
+        o << "    \"maxNs\": "    << maxLatencyNs   << ",\n";
+        o << "    \"stdDevNs\": " << stdDevNs       << ",\n";
+        o << "    \"p50Ns\": "    << p50LatencyNs   << ",\n";
+        o << "    \"p90Ns\": "    << p90LatencyNs   << ",\n";
+        o << "    \"p95Ns\": "    << p95LatencyNs   << ",\n";
+        o << "    \"p99Ns\": "    << p99LatencyNs   << ",\n";
+        o << "    \"p999Ns\": "   << p999LatencyNs  << ",\n";
+        o << "    \"p9999Ns\": "  << p9999LatencyNs << "\n";
         o << "  },\n";
         o << "  \"finalBookDepth\": "  << finalBookDepth  << "\n";
         o << "}";
@@ -106,11 +106,6 @@ public:
         const uint64_t sampleEvery =
             std::max(uint64_t(1), cfg_.totalOrders / cfg_.latencySamples);
 
-        // BUG FIX: Original used vector<OrderId> with erase-by-index, which is
-        // O(n) per cancel due to shifting. With liveIds capped at 50k entries
-        // and 20% cancel ratio across 20M orders, this caused ~2M O(50k) shifts
-        // — a massive hidden cost that inflated benchmark wall time and latency
-        // histograms. Replaced with swap-and-pop idiom for O(1) removal.
         std::vector<OrderId> liveIds;
         liveIds.reserve(50000);
         uint64_t orderIdCounter = cfg_.warmupOrders + 1;
@@ -125,7 +120,6 @@ public:
             auto t0 = std::chrono::high_resolution_clock::now();
 
             if (!liveIds.empty() && roll < cfg_.cancelRatio) {
-                // O(1) swap-and-pop instead of O(n) erase
                 size_t idx = rng() % liveIds.size();
                 OrderId id = liveIds[idx];
                 liveIds[idx] = liveIds.back();
@@ -168,9 +162,14 @@ public:
             }
 
             auto t1 = std::chrono::high_resolution_clock::now();
-            if ((i % sampleEvery == 0) && latencySamples.size() < cfg_.latencySamples)
+
+            // BUG FIX #5: Skip i=0 — first iteration has cold-cache overhead
+            // that inflates latency histograms. Start sampling from i=1.
+            if ((i > 0) && (i % sampleEvery == 0) &&
+                latencySamples.size() < cfg_.latencySamples) {
                 latencySamples.push_back(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+            }
         }
 
         auto wallEnd = std::chrono::high_resolution_clock::now();
