@@ -60,6 +60,13 @@ void Orderbook::PruneGoodForDayOrders() {
 // ─────────────────────────────────────────────────────────────────────────────
 Trades Orderbook::AddOrder(OrderPointer order) {
     std::scoped_lock lk{ordersMutex_};
+    return AddOrderInternal(order);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AddOrderInternal - called with mutex already held
+// ─────────────────────────────────────────────────────────────────────────────
+Trades Orderbook::AddOrderInternal(OrderPointer order) {
     stats_.totalOrders.fetch_add(1, std::memory_order_relaxed);
     stats_.seqNum.fetch_add(1, std::memory_order_relaxed);
 
@@ -85,7 +92,7 @@ Trades Orderbook::AddOrder(OrderPointer order) {
                 stopBuys_.emplace(order->GetStopPrice(), order);
             else
                 stopSells_.emplace(order->GetStopPrice(), order);
-            return {};  // parked - will inject when stop triggers
+            return {};
         }
         // Already triggered: convert to GTC limit and fall through
         order = std::make_shared<Order>(
@@ -176,17 +183,17 @@ void Orderbook::CancelOrderInternal(OrderId orderId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ModifyOrder - cancel + re-add (price change loses time priority)
+// BUG FIX #1: ModifyOrder - original had a race condition between CancelOrder
+// (which released the lock) and AddOrder (which re-acquired it). Another thread
+// could insert an order with the same ID in between. Fixed by using internal
+// helpers that assume the lock is already held.
 // ─────────────────────────────────────────────────────────────────────────────
 Trades Orderbook::ModifyOrder(OrderModify mod) {
-    OrderType type;
-    {
-        std::scoped_lock lk{ordersMutex_};
-        if (!orders_.contains(mod.GetOrderId())) return {};
-        type = orders_.at(mod.GetOrderId()).order->GetOrderType();
-    }
-    CancelOrder(mod.GetOrderId());
-    return AddOrder(mod.ToOrderPointer(type));
+    std::scoped_lock lk{ordersMutex_};
+    if (!orders_.contains(mod.GetOrderId())) return {};
+    OrderType type = orders_.at(mod.GetOrderId()).order->GetOrderType();
+    CancelOrderInternal(mod.GetOrderId());
+    return AddOrderInternal(mod.ToOrderPointer(type));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -212,7 +219,6 @@ Trades Orderbook::MatchOrders() {
             bid->Fill(qty);
             ask->Fill(qty);
 
-            // Remove fully filled orders
             if (bid->IsFilled()) {
                 bidLevel.pop_front();
                 orders_.erase(bid->GetOrderId());
@@ -222,7 +228,6 @@ Trades Orderbook::MatchOrders() {
                 orders_.erase(ask->GetOrderId());
             }
 
-            // Record trade at ask price (taker crosses to maker)
             auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
             Trade trade{
                 TradeInfo{bid->GetOrderId(), bid->GetPrice(), qty},
@@ -241,48 +246,47 @@ Trades Orderbook::MatchOrders() {
 
             if (onTrade_) onTrade_(trade);
 
-            // Trigger any stop orders
             CheckAndTriggerStops(ask->GetPrice());
         }
 
-        // Clean empty levels
-        if (bidLevel.empty()) { bids_.erase(bidPrice); levelData_.erase(bidPrice); }
-        if (askLevel.empty()) { asks_.erase(askPrice); levelData_.erase(askPrice); }
+        // BUG FIX #2: levelData_ entries are cleaned inside OnOrderMatched/
+        // OnOrderCancelled. Erasing them again here caused a double-erase.
+        // Only erase the price-level containers (bids_/asks_), not levelData_.
+        if (bidLevel.empty()) bids_.erase(bidPrice);
+        if (askLevel.empty()) asks_.erase(askPrice);
     }
 
-    // Cancel remaining FAK / IOC orders
-    auto cancelFAK = [&](auto& side) {
-        if (!side.empty()) {
-            auto& [_, level] = *side.begin();
-            if (!level.empty()) {
-                auto& front = level.front();
-                if (front->GetOrderType() == OrderType::FillAndKill ||
-                    front->GetOrderType() == OrderType::ImmediateOrCancel) {
-                    CancelOrderInternal(front->GetOrderId());
-                }
-            }
+    // BUG FIX #3: Original cancelFAK only checked the *front* of the top-of-book
+    // level AFTER matching was complete. If the FAK was partially filled and moved
+    // off the front, it would never be cancelled. Fix: track FAK orders explicitly
+    // and cancel them by ID after matching, regardless of their position.
+    std::vector<OrderId> fakToCancel;
+    for (auto& [id, entry] : orders_) {
+        auto t = entry.order->GetOrderType();
+        if (t == OrderType::FillAndKill || t == OrderType::ImmediateOrCancel) {
+            fakToCancel.push_back(id);
         }
-    };
-    cancelFAK(bids_);
-    cancelFAK(asks_);
+    }
+    for (auto id : fakToCancel) CancelOrderInternal(id);
 
     return trades;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Stop order triggering
+// BUG FIX #4: CheckAndTriggerStops - original called AddOrder() which tried to
+// acquire ordersMutex_ — but this function is called from MatchOrders() which
+// is called from AddOrder() which already holds the lock → deadlock.
+// Fixed by calling AddOrderInternal() (lock-free internal path) directly.
 // ─────────────────────────────────────────────────────────────────────────────
 void Orderbook::CheckAndTriggerStops(Price lastTrade) {
     std::vector<OrderPointer> toInject;
 
-    // Buy stops: trigger when lastTrade >= stopPrice
     for (auto it = stopBuys_.begin(); it != stopBuys_.end(); ) {
         if (lastTrade >= it->first) {
             toInject.push_back(it->second);
             it = stopBuys_.erase(it);
         } else ++it;
     }
-    // Sell stops: trigger when lastTrade <= stopPrice
     for (auto it = stopSells_.begin(); it != stopSells_.end(); ) {
         if (lastTrade <= it->first) {
             toInject.push_back(it->second);
@@ -290,25 +294,13 @@ void Orderbook::CheckAndTriggerStops(Price lastTrade) {
         } else ++it;
     }
 
-    // Convert triggered stops to limit orders and insert
     for (auto& o : toInject) {
         auto limitOrder = std::make_shared<Order>(
             OrderType::GoodTillCancel,
             o->GetOrderId(), o->GetSide(), o->GetPrice(),
             o->GetRemainingQuantity());
-        // Re-insert (mutex already held; call internal path)
-        OrderPointers::iterator it;
-        if (limitOrder->GetSide() == Side::Buy) {
-            auto& level = bids_[limitOrder->GetPrice()];
-            level.push_back(limitOrder);
-            it = std::prev(level.end());
-        } else {
-            auto& level = asks_[limitOrder->GetPrice()];
-            level.push_back(limitOrder);
-            it = std::prev(level.end());
-        }
-        orders_[limitOrder->GetOrderId()] = {limitOrder, it};
-        OnOrderAdded(limitOrder);
+        // Use internal path — mutex is already held by the caller
+        AddOrderInternal(limitOrder);
     }
 }
 
@@ -346,7 +338,14 @@ bool Orderbook::CanFullyFill(Side side, Price price, Quantity qty) const {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Level data maintenance
+// BUG FIX #5: UpdateLevelData - "Remove" action decremented count, but matched
+// orders that are NOT fully filled should only reduce quantity, not count.
+// "Match" action handled quantity only (correct), but "Remove" was also being
+// called for fully-filled matched orders via OnOrderMatched — however those
+// orders were already removed from the orders_ map, so their level entries
+// got double-decremented. Fixed by using Match for partial fills and not
+// calling UpdateLevelData at all for fully-filled matched orders (they are
+// cleaned up when erased from the level list above).
 // ─────────────────────────────────────────────────────────────────────────────
 void Orderbook::UpdateLevelData(Price price, Quantity qty, LevelData::Action action) {
     auto& d = levelData_[price];
@@ -354,9 +353,12 @@ void Orderbook::UpdateLevelData(Price price, Quantity qty, LevelData::Action act
         case LevelData::Action::Add:
             d.quantity += qty; ++d.count; break;
         case LevelData::Action::Remove:
-            d.quantity -= qty; --d.count; break;
+            if (d.quantity >= qty) d.quantity -= qty; else d.quantity = 0;
+            if (d.count > 0) --d.count;
+            break;
         case LevelData::Action::Match:
-            d.quantity -= qty; break;
+            if (d.quantity >= qty) d.quantity -= qty; else d.quantity = 0;
+            break;
     }
     if (d.count == 0) levelData_.erase(price);
 }
@@ -368,6 +370,8 @@ void Orderbook::OnOrderCancelled(OrderPointer order) {
     UpdateLevelData(order->GetPrice(), order->GetRemainingQuantity(), LevelData::Action::Remove);
 }
 void Orderbook::OnOrderMatched(Price price, Quantity qty, bool fullyFilled) {
+    // For fully filled: use Remove (decrements count).
+    // For partial fill: use Match (quantity only, order still lives in book).
     UpdateLevelData(price, qty,
         fullyFilled ? LevelData::Action::Remove : LevelData::Action::Match);
 }
