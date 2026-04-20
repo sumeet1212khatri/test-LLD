@@ -16,24 +16,32 @@ async def root():
 @app.get("/api/benchmark")
 async def run_benchmark(orders: int = 1000000, cancel: float = 0.20, market: float = 0.10):
     cmd = [
-        "./build/benchmark", 
-        "--orders", str(orders), 
-        "--cancel-ratio", str(cancel), 
-        "--market-ratio", str(market), 
-        "--json", 
+        "./build/benchmark",
+        "--orders", str(orders),
+        "--cancel-ratio", str(cancel),
+        "--market-ratio", str(market),
+        "--json",
         "--quiet"
     ]
-    
+
+    # BUG FIX: Original code had `result` referenced in the JSONDecodeError
+    # handler, but `result` is only assigned inside the try block when
+    # check=True raises CalledProcessError before the assignment can happen.
+    # This would throw a NameError, masking the real error. Fix: capture
+    # stdout explicitly before calling check, so result is always defined.
+    stdout_data = ""
     try:
-        # Capture stderr as well to see C++ crash logs
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return json.loads(result.stdout)
-    except subprocess.CalledProcessError as e:
-        # This catches segfaults or return code 1
-        return {"error": f"C++ Binary Crashed (Code {e.returncode}). Stderr: {e.stderr}"}
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        stdout_data = proc.stdout
+
+        if proc.returncode != 0:
+            return {
+                "error": f"C++ Binary Crashed (Code {proc.returncode}). Stderr: {proc.stderr}"
+            }
+
+        return json.loads(stdout_data)
+
     except json.JSONDecodeError:
-        # This catches if the binary prints text instead of JSON
-        return {"error": f"Invalid JSON output from C++: {result.stdout}"}
+        return {"error": f"Invalid JSON output from C++: {stdout_data!r}"}
     except Exception as e:
-        # Generic python errors
         return {"error": f"Server execution error: {str(e)}"}
