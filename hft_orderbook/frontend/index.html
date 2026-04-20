@@ -6,7 +6,13 @@
 <title>HFT Order Book Engine</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#080c10; --bg2:#0d1117; --border:#1e2d3d; --green:#00ff88; --cyan:#00e5ff; --text:#e2e8f0; --text2:#8899aa; }
+  /* BUG FIX #7: Added --red variable — was missing, causing error text to
+     render in default browser color (usually black on dark bg = invisible) */
+  :root {
+    --bg:#080c10; --bg2:#0d1117; --border:#1e2d3d;
+    --green:#00ff88; --cyan:#00e5ff; --red:#ff4444;
+    --text:#e2e8f0; --text2:#8899aa;
+  }
   body { background: var(--bg); color: var(--text); font-family: 'Space Grotesk', sans-serif; margin:0; padding:32px; }
   .panel { background: var(--bg2); border: 1px solid var(--border); padding: 24px; border-radius: 8px; margin-bottom: 24px; }
   .panel-title { font-family: 'JetBrains Mono'; font-size: 12px; color: var(--text2); letter-spacing: 2px; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
@@ -45,7 +51,7 @@
 
 <script>
 async function runBenchmark() {
-  const btn = document.getElementById('run-btn');
+  const btn    = document.getElementById('run-btn');
   const status = document.getElementById('status');
   const orders = document.getElementById('cfg-orders').value;
   const cancel = document.getElementById('cfg-cancel').value;
@@ -57,38 +63,42 @@ async function runBenchmark() {
   document.getElementById('results').style.display = 'none';
 
   try {
-    const res = await fetch(`/api/benchmark?orders=${orders}&cancel=${cancel}&market=${market}`);
+    const res  = await fetch(`/api/benchmark?orders=${orders}&cancel=${cancel}&market=${market}`);
     const data = await res.json();
-    
-    if(data.error) {
-        status.innerText = "Execution Error: " + data.error;
-        status.style.color = "var(--red)";
-        btn.disabled = false;
-        return;
+
+    if (data.error) {
+      // BUG FIX #7: Now uses var(--red) which is actually defined — error
+      // text is now visible in red instead of disappearing into the dark bg.
+      status.innerText = "Error: " + data.error;
+      status.style.color = "var(--red)";
+      btn.disabled = false;
+      return;
     }
 
     document.getElementById('json-output').innerText = JSON.stringify(data, null, 2);
-    
+
     const kpis = [
-      { label: "THROUGHPUT (OPS/SEC)", val: data.ordersPerSecond.toLocaleString(undefined, {maximumFractionDigits: 0}) },
+      { label: "THROUGHPUT (OPS/SEC)",    val: data.ordersPerSecond.toLocaleString(undefined, {maximumFractionDigits: 0}) },
       { label: "TRADE RATE (TRADES/SEC)", val: data.tradesPerSecond.toLocaleString(undefined, {maximumFractionDigits: 0}) },
-      { label: "WALL TIME", val: data.wallTimeSeconds.toFixed(2) + "s" },
-      { label: "ORDERS PROCESSED", val: data.totalOrders.toLocaleString() },
-      { label: "P50 LATENCY", val: data.latency.p50Ns + " ns" },
-      { label: "P99 LATENCY", val: data.latency.p99Ns + " ns" }
+      { label: "WALL TIME",               val: data.wallTimeSeconds.toFixed(2) + "s" },
+      { label: "ORDERS PROCESSED",        val: data.totalOrders.toLocaleString() },
+      { label: "P50 LATENCY",             val: data.latency.p50Ns + " ns" },
+      { label: "P99 LATENCY",             val: data.latency.p99Ns + " ns" }
     ];
 
-    document.getElementById('kpi-grid').innerHTML = kpis.map(k => 
+    document.getElementById('kpi-grid').innerHTML = kpis.map(k =>
       `<div class="kpi"><span>${k.label}</span><strong>${k.val}</strong></div>`
     ).join('');
 
     status.innerText = "✓ Execution Complete";
     status.style.color = "var(--green)";
     document.getElementById('results').style.display = 'block';
+
   } catch (err) {
-    status.innerText = "Network or server failure.";
+    status.innerText = "Network or server failure: " + err.message;
     status.style.color = "var(--red)";
   }
+
   btn.disabled = false;
 }
 </script>
