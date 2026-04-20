@@ -2,88 +2,83 @@
 #include "Types.h"
 #include <memory>
 #include <stdexcept>
-#include <string>   // <-- Yahan <format> hata kar <string> lagaya
+#include <string>
+#include <list>
 #include <chrono>
 
-/**
- * @brief HFT-grade Order with all order types including Iceberg, StopLimit, PostOnly.
- * Minimizes memory footprint (cache-line friendly) and avoids virtual dispatch.
- */
 class Order {
 public:
-    // ─── Full constructor ───────────────────────────────────────────────────────
     Order(OrderType   orderType,
           OrderId     orderId,
           Side        side,
           Price       price,
           Quantity    quantity,
-          Quantity    peakQuantity  = 0,    // Iceberg: visible peak
-          Price       stopPrice     = Constants::InvalidPrice) // StopLimit trigger
-        : orderType_      { orderType   }
-        , orderId_        { orderId     }
-        , side_           { side        }
-        , price_          { price       }
-        , stopPrice_      { stopPrice   }
-        , initialQty_     { quantity    }
-        , remainingQty_   { quantity    }
-        , displayQty_     { peakQuantity > 0 ? peakQuantity : quantity }
-        , peakQty_        { peakQuantity }
-        , status_         { OrderStatus::New }
-        , timestamp_      { std::chrono::steady_clock::now().time_since_epoch().count() }
+          Quantity    peakQuantity  = 0,
+          Price       stopPrice     = Constants::InvalidPrice)
+        : orderType_    { orderType    }
+        , orderId_      { orderId      }
+        , side_         { side         }
+        , status_       { OrderStatus::New }
+        , price_        { price        }
+        , stopPrice_    { stopPrice    }
+        , initialQty_   { quantity     }
+        , remainingQty_ { quantity     }
+        , displayQty_   { peakQuantity > 0 ? peakQuantity : quantity }
+        , peakQty_      { peakQuantity }
+        , timestamp_    { std::chrono::steady_clock::now().time_since_epoch().count() }
     {}
 
-    // ─── Market order convenience ────────────────────────────────────────────────
+    // Market order convenience
     Order(OrderId orderId, Side side, Quantity quantity)
         : Order(OrderType::Market, orderId, side, Constants::InvalidPrice, quantity)
     {}
 
-    // ─── Accessors ───────────────────────────────────────────────────────────────
-    OrderId     GetOrderId()          const noexcept { return orderId_;        }
-    Side        GetSide()             const noexcept { return side_;           }
-    Price       GetPrice()            const noexcept { return price_;          }
-    Price       GetStopPrice()        const noexcept { return stopPrice_;      }
-    OrderType   GetOrderType()        const noexcept { return orderType_;      }
-    OrderStatus GetStatus()           const noexcept { return status_;         }
-    Quantity    GetInitialQuantity()  const noexcept { return initialQty_;     }
-    Quantity    GetRemainingQuantity()const noexcept { return remainingQty_;   }
-    Quantity    GetFilledQuantity()   const noexcept { return initialQty_ - remainingQty_; }
-    Quantity    GetDisplayQuantity()  const noexcept { return displayQty_;     }
-    Quantity    GetPeakQuantity()     const noexcept { return peakQty_;        }
-    int64_t     GetTimestamp()        const noexcept { return timestamp_;      }
-    bool        IsFilled()            const noexcept { return remainingQty_ == 0; }
-    bool        IsIceberg()           const noexcept { return peakQty_ > 0 && peakQty_ < initialQty_; }
+    // ─── Accessors ───────────────────────────────────────────────────────────
+    OrderId     GetOrderId()           const noexcept { return orderId_;        }
+    Side        GetSide()              const noexcept { return side_;           }
+    Price       GetPrice()             const noexcept { return price_;          }
+    Price       GetStopPrice()         const noexcept { return stopPrice_;      }
+    OrderType   GetOrderType()         const noexcept { return orderType_;      }
+    OrderStatus GetStatus()            const noexcept { return status_;         }
+    Quantity    GetInitialQuantity()   const noexcept { return initialQty_;     }
+    Quantity    GetRemainingQuantity() const noexcept { return remainingQty_;   }
+    Quantity    GetFilledQuantity()    const noexcept { return initialQty_ - remainingQty_; }
+    Quantity    GetDisplayQuantity()   const noexcept { return displayQty_;     }
+    Quantity    GetPeakQuantity()      const noexcept { return peakQty_;        }
+    int64_t     GetTimestamp()         const noexcept { return timestamp_;      }
+    bool        IsFilled()             const noexcept { return remainingQty_ == 0; }
+    bool        IsIceberg()            const noexcept { return peakQty_ > 0 && peakQty_ < initialQty_; }
 
-    // ─── Mutators ────────────────────────────────────────────────────────────────
+    // ─── Mutators ────────────────────────────────────────────────────────────
     void Fill(Quantity qty) {
         if (qty > remainingQty_) [[unlikely]]
-            // <-- Yahan std::format ki jagah simple string concatenation use kiya hai
-            throw std::logic_error("Order " + std::to_string(orderId_) + " cannot fill " + std::to_string(qty) + " > remaining " + std::to_string(remainingQty_));
-        
+            throw std::logic_error(
+                "Order " + std::to_string(orderId_) +
+                " cannot fill " + std::to_string(qty) +
+                " > remaining " + std::to_string(remainingQty_));
+
         remainingQty_ -= qty;
-        // Iceberg: replenish display quantity from hidden reserve
+
         if (IsIceberg()) {
-            if (displayQty_ >= qty) {
-                displayQty_ -= qty;
-            } else {
-                displayQty_ = 0;
-            }
-            if (displayQty_ == 0 && remainingQty_ > 0) {
+            if (displayQty_ >= qty) displayQty_ -= qty;
+            else                    displayQty_ = 0;
+            if (displayQty_ == 0 && remainingQty_ > 0)
                 displayQty_ = std::min(peakQty_, remainingQty_);
-            }
         } else {
             displayQty_ = remainingQty_;
         }
-        if (remainingQty_ == 0)        status_ = OrderStatus::Filled;
-        else if (qty > 0)              status_ = OrderStatus::PartiallyFilled;
+
+        if (remainingQty_ == 0) status_ = OrderStatus::Filled;
+        else if (qty > 0)       status_ = OrderStatus::PartiallyFilled;
     }
 
     void Cancel() noexcept { status_ = OrderStatus::Cancelled; }
 
     void ToGoodTillCancel(Price price) {
         if (orderType_ != OrderType::Market) [[unlikely]]
-            // <-- Yahan bhi std::format hata diya hai
-            throw std::logic_error("Order " + std::to_string(orderId_) + " is not Market type, cannot convert to GTC");
-        
+            throw std::logic_error(
+                "Order " + std::to_string(orderId_) +
+                " is not Market type, cannot convert to GTC");
         price_     = price;
         orderType_ = OrderType::GoodTillCancel;
     }
@@ -91,20 +86,23 @@ public:
     void SetStatus(OrderStatus s) noexcept { status_ = s; }
 
 private:
-    // Pack fields carefully for cache efficiency (64 bytes total)
+    // Members declared in initialization order (matches constructor init list)
+    // to avoid -Wreorder warnings
     OrderType   orderType_;
+    OrderId     orderId_;
     Side        side_;
     OrderStatus status_;
-    uint8_t     pad_[1];
-    OrderId     orderId_;       // 8 bytes
-    Price       price_;         // 4 bytes
-    Price       stopPrice_;     // 4 bytes
-    Quantity    initialQty_;    // 4 bytes
-    Quantity    remainingQty_;  // 4 bytes
-    Quantity    displayQty_;    // 4 bytes (iceberg: visible)
-    Quantity    peakQty_;       // 4 bytes (iceberg: peak size)
-    int64_t     timestamp_;     // 8 bytes (nanoseconds)
+    Price       price_;
+    Price       stopPrice_;
+    Quantity    initialQty_;
+    Quantity    remainingQty_;
+    Quantity    displayQty_;
+    Quantity    peakQty_;
+    int64_t     timestamp_;
 };
 
+// BUG FIX: Original defined OrderPointer as Order* (raw pointer).
+// All engine code uses shared_ptr semantics (lifetime managed, no manual delete).
+// Raw pointer caused "cannot convert shared_ptr<Order> to Order*" errors.
 using OrderPointer  = std::shared_ptr<Order>;
 using OrderPointers = std::list<OrderPointer>;
