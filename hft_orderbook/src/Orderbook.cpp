@@ -141,7 +141,20 @@ Trades Orderbook::AddOrderInternal(OrderPointer order) {
     OnOrderAdded(order);
     if (onAdded_) onAdded_(*order);
 
-    return MatchOrders();
+    // Get trades from the matching engine
+    Trades trades = MatchOrders();
+
+    // O(1) FAK/IOC cleanup (replaces the O(N) sweep)
+    if (order->GetOrderType() == OrderType::FillAndKill ||
+        order->GetOrderType() == OrderType::ImmediateOrCancel) {
+        
+        // If the order is still in the book after matching, cancel the remainder
+        if (orders_.contains(order->GetOrderId())) {
+            CancelOrderInternal(order->GetOrderId());
+        }
+    }
+
+    return trades;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -270,15 +283,6 @@ Trades Orderbook::MatchOrders() {
         if (bidLevel.empty()) bids_.erase(bidPrice);
         if (askLevel.empty()) asks_.erase(askPrice);
     }
-
-    // Cancel remaining FAK/IOC orders
-    std::vector<OrderId> fakToCancel;
-    for (auto& [id, entry] : orders_) {
-        auto t = entry.order->GetOrderType();
-        if (t == OrderType::FillAndKill || t == OrderType::ImmediateOrCancel)
-            fakToCancel.push_back(id);
-    }
-    for (auto id : fakToCancel) CancelOrderInternal(id);
 
     // BUG FIX #3: Drain pendingStops_ AFTER matching is fully complete.
     // Swap first so that any stops triggered by injected orders go into
