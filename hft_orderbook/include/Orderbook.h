@@ -16,21 +16,8 @@
 #include "Order.h"
 #include "Trade.h"
 
-/**
- * @brief Citadel/HFT-grade Order Book Matching Engine
- *
- * Design principles:
- *  - Price-Time priority (FIFO within price level)
- *  - O(1) order lookup via hash map
- *  - O(log N) price level access via std::map (red-black tree)
- *  - Support for: GTC, FAK, FOK, GFD, Market, IOC, PostOnly, Iceberg, StopLimit
- *  - Thread-safe: single mutex per book (standard), or lock-free path for benchmarking
- *  - Event callbacks for order lifecycle hooks (trading system integration)
- *  - Level-2 market data feed generation
- */
 class Orderbook {
 public:
-    // ─── Callbacks / Event Hooks ───────────────────────────────────────────────
     using OnTradeCallback   = std::function<void(const Trade&)>;
     using OnOrderCallback   = std::function<void(const Order&)>;
     using OnSnapshotCallback= std::function<void(const OrderbookSnapshot&)>;
@@ -64,15 +51,13 @@ public:
     uint64_t GetSequenceNumber() const noexcept { return stats_.seqNum.load();        }
 
     // ─── Event Hooks ──────────────────────────────────────────────────────────
-    void SetOnTrade(OnTradeCallback cb)    { onTrade_    = std::move(cb); }
-    void SetOnOrderAdded(OnOrderCallback cb) { onAdded_ = std::move(cb); }
+    void SetOnTrade(OnTradeCallback cb)          { onTrade_     = std::move(cb); }
+    void SetOnOrderAdded(OnOrderCallback cb)     { onAdded_     = std::move(cb); }
     void SetOnOrderCancelled(OnOrderCallback cb) { onCancelled_ = std::move(cb); }
 
-    // ─── Stop-Limit Support ──────────────────────────────────────────────────
     void CheckAndTriggerStops(Price lastTrade);
 
 private:
-    // ─── Internal Data Structures ────────────────────────────────────────────
     struct OrderEntry {
         OrderPointer           order;
         OrderPointers::iterator location;
@@ -84,24 +69,18 @@ private:
         enum class Action { Add, Remove, Match };
     };
 
-    // Bid side: highest price first
     std::map<Price, OrderPointers, std::greater<Price>> bids_;
-    // Ask side: lowest price first
     std::map<Price, OrderPointers, std::less<Price>>    asks_;
-    // O(1) lookup by OrderId
     std::unordered_map<OrderId, OrderEntry>             orders_;
-    // Aggregated level data for fast L2 snapshot
     std::unordered_map<Price, LevelData>                levelData_;
-    // Stop orders pending trigger
-    std::multimap<Price, OrderPointer>                  stopBuys_;   // trigger >= price
-    std::multimap<Price, OrderPointer, std::greater<Price>> stopSells_; // trigger <= price
+    std::multimap<Price, OrderPointer>                  stopBuys_;
+    std::multimap<Price, OrderPointer, std::greater<Price>> stopSells_;
 
     mutable std::mutex ordersMutex_;
     std::thread        pruneThread_;
     std::condition_variable shutdownCV_;
     std::atomic<bool>  shutdown_{false};
 
-    // ─── Statistics ───────────────────────────────────────────────────────────
     struct Stats {
         std::atomic<uint64_t> totalOrders{0};
         std::atomic<uint64_t> totalTrades{0};
@@ -112,15 +91,18 @@ private:
         std::atomic<Quantity> lastTradeQty{0};
     } stats_;
 
-    // ─── Event Callbacks ─────────────────────────────────────────────────────
     OnTradeCallback   onTrade_;
     OnOrderCallback   onAdded_;
     OnOrderCallback   onCancelled_;
 
-    // ─── Internal Methods ─────────────────────────────────────────────────────
     void     PruneGoodForDayOrders();
     void     CancelOrdersInternal(const OrderIds& ids);
     void     CancelOrderInternal (OrderId orderId);
+
+    // BUG FIX: Internal add/match that assumes mutex is already held.
+    // Required to fix the deadlock in CheckAndTriggerStops and the race
+    // condition in ModifyOrder.
+    Trades   AddOrderInternal(OrderPointer order);
 
     bool     CanMatch     (Side side, Price price) const;
     bool     CanFullyFill (Side side, Price price, Quantity qty) const;
