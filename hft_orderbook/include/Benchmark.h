@@ -11,7 +11,6 @@
 #include <iomanip>
 #include <iostream>
 
-// ─── Config (outside class so default-construction works in all compilers) ────
 struct BenchmarkConfig {
     uint64_t totalOrders     = 20'000'000;
     uint32_t numSymbols      = 1;
@@ -20,8 +19,8 @@ struct BenchmarkConfig {
     double   marketRatio     = 0.10;
     double   icebergRatio    = 0.02;
     double   bidAskRatio     = 0.50;
-    Price    midPrice        = 10000;   // $100.00 (cents)
-    Price    priceSpread     = 500;     // ±$5
+    Price    midPrice        = 10000;
+    Price    priceSpread     = 500;
     Quantity minQty          = 1;
     Quantity maxQty          = 1000;
     bool     warmup          = true;
@@ -93,7 +92,6 @@ public:
         std::uniform_int_distribution<Quantity> qtyDist{cfg_.minQty, cfg_.maxQty};
         std::uniform_real_distribution<double>  chanceDist{0.0, 1.0};
 
-        // ── Warmup ───────────────────────────────────────────────────────────
         if (cfg_.warmup) {
             if (cfg_.verbose)
                 std::cout << "[BENCH] Warming up with " << cfg_.warmupOrders << " orders...\n";
@@ -103,12 +101,16 @@ public:
             }
         }
 
-        // ── Benchmark ────────────────────────────────────────────────────────
         std::vector<uint64_t> latencySamples;
         latencySamples.reserve(cfg_.latencySamples);
         const uint64_t sampleEvery =
             std::max(uint64_t(1), cfg_.totalOrders / cfg_.latencySamples);
 
+        // BUG FIX: Original used vector<OrderId> with erase-by-index, which is
+        // O(n) per cancel due to shifting. With liveIds capped at 50k entries
+        // and 20% cancel ratio across 20M orders, this caused ~2M O(50k) shifts
+        // — a massive hidden cost that inflated benchmark wall time and latency
+        // histograms. Replaced with swap-and-pop idiom for O(1) removal.
         std::vector<OrderId> liveIds;
         liveIds.reserve(50000);
         uint64_t orderIdCounter = cfg_.warmupOrders + 1;
@@ -123,9 +125,11 @@ public:
             auto t0 = std::chrono::high_resolution_clock::now();
 
             if (!liveIds.empty() && roll < cfg_.cancelRatio) {
+                // O(1) swap-and-pop instead of O(n) erase
                 size_t idx = rng() % liveIds.size();
                 OrderId id = liveIds[idx];
-                liveIds.erase(liveIds.begin() + idx);
+                liveIds[idx] = liveIds.back();
+                liveIds.pop_back();
                 book.CancelOrder(id);
 
             } else if (!liveIds.empty() && roll < cfg_.cancelRatio + cfg_.modifyRatio) {
@@ -172,7 +176,6 @@ public:
         auto wallEnd = std::chrono::high_resolution_clock::now();
         double wallSec = std::chrono::duration<double>(wallEnd - wallStart).count();
 
-        // ── Latency stats ────────────────────────────────────────────────────
         std::sort(latencySamples.begin(), latencySamples.end());
         auto pct = [&](double p) -> double {
             if (latencySamples.empty()) return 0;
