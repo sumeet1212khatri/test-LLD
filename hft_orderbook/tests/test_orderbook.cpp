@@ -21,7 +21,7 @@ void runTest(const std::string& name, std::function<void()> fn) {
 #define VERIFY_EQ(a,b) do { if ((a)!=(b)) throw std::logic_error(std::string(#a" != "#b" (got ")+std::to_string(a)+" vs "+std::to_string(b)+")"); } while(0)
 #define VERIFY_TRUE(c) do { if (!(c)) throw std::logic_error("Expected true: " #c); } while(0)
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers — use make_shared, no ObjectPool dependency ──────────────────────
 static OrderPointer MakeGTC(OrderId id, Side side, Price price, Quantity qty) {
     return std::make_shared<Order>(OrderType::GoodTillCancel, id, side, price, qty);
 }
@@ -113,7 +113,7 @@ int main() {
 
     runTest("Cancel_NonExistent", [] {
         Orderbook book;
-        book.CancelOrder(999); // no throw
+        book.CancelOrder(999);
         VERIFY_EQ(book.Size(), 0u);
     });
 
@@ -148,7 +148,7 @@ int main() {
         book.AddOrder(MakeIceberg(1, Side::Sell, 100, 100, 25));
         auto trades = book.AddOrder(MakeGTC(2, Side::Buy, 100, 25));
         VERIFY_EQ(trades.size(), 1u);
-        VERIFY_EQ(book.Size(), 1u); // iceberg has 75 remaining
+        VERIFY_EQ(book.Size(), 1u);
     });
 
     runTest("PostOnly_Rejected_On_Cross", [] {
@@ -161,7 +161,7 @@ int main() {
 
     runTest("PostOnly_Accepted_As_Maker", [] {
         Orderbook book;
-        auto trades = book.AddOrder(MakePostOnly(1, Side::Buy, 99, 10));
+        book.AddOrder(MakePostOnly(1, Side::Buy, 99, 10));
         VERIFY_EQ(book.Size(), 1u);
     });
 
@@ -172,7 +172,7 @@ int main() {
         book.AddOrder(MakeGTC(3, Side::Sell, 101, 5));
         auto trades = book.AddOrder(MakeGTC(4, Side::Buy, 100, 5));
         VERIFY_EQ(trades.size(), 1u);
-        VERIFY_EQ(trades[0].GetAskTrade().orderId, 1u); // first in = first out
+        VERIFY_EQ(trades[0].GetAskTrade().orderId, 1u);
     });
 
     runTest("Spread_And_MidPrice", [] {
