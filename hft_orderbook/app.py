@@ -24,14 +24,12 @@ async def run_benchmark(orders: int = 1000000, cancel: float = 0.20, market: flo
         "--quiet"
     ]
 
-    # BUG FIX: Original code had `result` referenced in the JSONDecodeError
-    # handler, but `result` is only assigned inside the try block when
-    # check=True raises CalledProcessError before the assignment can happen.
-    # This would throw a NameError, masking the real error. Fix: capture
-    # stdout explicitly before calling check, so result is always defined.
     stdout_data = ""
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        # BUG FIX #6: Added timeout=120 — 20M benchmark takes ~35s on cloud VM.
+        # Without timeout, HF Space HTTP request silently kills the process at
+        # ~30s leaving the frontend hanging with no error message.
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         stdout_data = proc.stdout
 
         if proc.returncode != 0:
@@ -41,7 +39,13 @@ async def run_benchmark(orders: int = 1000000, cancel: float = 0.20, market: flo
 
         return json.loads(stdout_data)
 
+    except subprocess.TimeoutExpired:
+        # BUG FIX #6: Catch timeout explicitly and return clean error JSON
+        # instead of crashing the FastAPI worker process.
+        return {"error": "Benchmark timed out after 120 seconds. Try fewer orders (1M or 5M)."}
+
     except json.JSONDecodeError:
         return {"error": f"Invalid JSON output from C++: {stdout_data!r}"}
+
     except Exception as e:
         return {"error": f"Server execution error: {str(e)}"}
