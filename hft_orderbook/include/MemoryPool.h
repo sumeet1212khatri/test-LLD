@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cassert>
 #include <new>
+#include <vector>  // BUG FIX #1: Was missing — ArenaAllocator uses std::vector<std::byte>
 
 /**
  * @brief Fixed-size object pool using a lock-free free list.
@@ -24,7 +25,6 @@ class ObjectPool {
 
 public:
     ObjectPool() {
-        // Build initial free list
         for (size_t i = 0; i < PoolSize - 1; ++i)
             pool_[i].next.store(&pool_[i + 1], std::memory_order_relaxed);
         pool_[PoolSize - 1].next.store(nullptr, std::memory_order_relaxed);
@@ -34,7 +34,7 @@ public:
     template<typename... Args>
     T* allocate(Args&&... args) {
         Block* block = popFreeList();
-        if (!block) return nullptr;  // pool exhausted – caller must fallback
+        if (!block) return nullptr;
         ++allocated_;
         ++totalAllocs_;
         return new (block->storage) T(std::forward<Args>(args)...);
@@ -48,10 +48,8 @@ public:
         --allocated_;
     }
 
-    size_t available() const noexcept {
-        return PoolSize - allocated_.load(std::memory_order_relaxed);
-    }
-    size_t totalAllocs() const noexcept { return totalAllocs_.load(); }
+    size_t available()    const noexcept { return PoolSize - allocated_.load(std::memory_order_relaxed); }
+    size_t totalAllocs()  const noexcept { return totalAllocs_.load(); }
 
 private:
     Block* popFreeList() noexcept {
@@ -76,7 +74,6 @@ private:
 
 /**
  * @brief Arena allocator for bulk allocations with O(1) reset.
- *        Used for per-batch order processing.
  */
 class ArenaAllocator {
     std::vector<std::byte> buf_;
@@ -92,7 +89,7 @@ public:
         return ptr;
     }
 
-    void reset() noexcept { offset_ = 0; }
-    size_t used() const noexcept { return offset_; }
+    void reset()     noexcept { offset_ = 0; }
+    size_t used()    const noexcept { return offset_; }
     size_t capacity() const noexcept { return buf_.size(); }
 };
