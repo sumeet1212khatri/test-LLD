@@ -18,9 +18,9 @@
 
 class Orderbook {
 public:
-    using OnTradeCallback   = std::function<void(const Trade&)>;
-    using OnOrderCallback   = std::function<void(const Order&)>;
-    using OnSnapshotCallback= std::function<void(const OrderbookSnapshot&)>;
+    using OnTradeCallback    = std::function<void(const Trade&)>;
+    using OnOrderCallback    = std::function<void(const Order&)>;
+    using OnSnapshotCallback = std::function<void(const OrderbookSnapshot&)>;
 
     Orderbook();
     ~Orderbook();
@@ -35,26 +35,28 @@ public:
     Trades   ModifyOrder(OrderModify order);
 
     // ─── Query API ────────────────────────────────────────────────────────────
-    std::size_t        Size()         const;
-    bool               HasOrder(OrderId) const;
-    OrderbookSnapshot  GetSnapshot()  const;
-    Price              BestBid()      const;
-    Price              BestAsk()      const;
-    Price              MidPrice()     const;
-    Price              Spread()       const;
+    std::size_t       Size()        const;
+    bool              HasOrder(OrderId) const;
+    OrderbookSnapshot GetSnapshot() const;
+    Price             BestBid()     const;
+    Price             BestAsk()     const;
+    Price             MidPrice()    const;
+    Price             Spread()      const;
 
     // ─── Statistics ───────────────────────────────────────────────────────────
-    uint64_t GetTotalOrders()    const noexcept { return stats_.totalOrders.load();   }
-    uint64_t GetTotalTrades()    const noexcept { return stats_.totalTrades.load();   }
-    uint64_t GetTotalCancels()   const noexcept { return stats_.totalCancels.load();  }
-    uint64_t GetTotalVolume()    const noexcept { return stats_.totalVolume.load();   }
-    uint64_t GetSequenceNumber() const noexcept { return stats_.seqNum.load();        }
+    uint64_t GetTotalOrders()    const noexcept { return stats_.totalOrders.load();  }
+    uint64_t GetTotalTrades()    const noexcept { return stats_.totalTrades.load();  }
+    uint64_t GetTotalCancels()   const noexcept { return stats_.totalCancels.load(); }
+    uint64_t GetTotalVolume()    const noexcept { return stats_.totalVolume.load();  }
+    uint64_t GetSequenceNumber() const noexcept { return stats_.seqNum.load();       }
 
     // ─── Event Hooks ──────────────────────────────────────────────────────────
     void SetOnTrade(OnTradeCallback cb)          { onTrade_     = std::move(cb); }
     void SetOnOrderAdded(OnOrderCallback cb)     { onAdded_     = std::move(cb); }
     void SetOnOrderCancelled(OnOrderCallback cb) { onCancelled_ = std::move(cb); }
 
+    // BUG FIX #3: No longer public — called internally only, no longer calls
+    // AddOrderInternal directly to avoid recursive MatchOrders → stack overflow.
     void CheckAndTriggerStops(Price lastTrade);
 
 private:
@@ -76,10 +78,15 @@ private:
     std::multimap<Price, OrderPointer>                  stopBuys_;
     std::multimap<Price, OrderPointer, std::greater<Price>> stopSells_;
 
-    mutable std::mutex ordersMutex_;
-    std::thread        pruneThread_;
-    std::condition_variable shutdownCV_;
-    std::atomic<bool>  shutdown_{false};
+    // BUG FIX #3: Deferred stop injection buffer — stops collected here during
+    // MatchOrders and injected AFTER matching loop exits, preventing recursive
+    // MatchOrders calls that could cause stack overflow on stop chains.
+    std::vector<OrderPointer> pendingStops_;
+
+    mutable std::mutex         ordersMutex_;
+    std::thread                pruneThread_;
+    std::condition_variable    shutdownCV_;
+    std::atomic<bool>          shutdown_{false};
 
     struct Stats {
         std::atomic<uint64_t> totalOrders{0};
@@ -91,27 +98,23 @@ private:
         std::atomic<Quantity> lastTradeQty{0};
     } stats_;
 
-    OnTradeCallback   onTrade_;
-    OnOrderCallback   onAdded_;
-    OnOrderCallback   onCancelled_;
+    OnTradeCallback  onTrade_;
+    OnOrderCallback  onAdded_;
+    OnOrderCallback  onCancelled_;
 
-    void     PruneGoodForDayOrders();
-    void     CancelOrdersInternal(const OrderIds& ids);
-    void     CancelOrderInternal (OrderId orderId);
+    void   PruneGoodForDayOrders();
+    void   CancelOrdersInternal(const OrderIds& ids);
+    void   CancelOrderInternal (OrderId orderId);
+    Trades AddOrderInternal    (OrderPointer order);
 
-    // BUG FIX: Internal add/match that assumes mutex is already held.
-    // Required to fix the deadlock in CheckAndTriggerStops and the race
-    // condition in ModifyOrder.
-    Trades   AddOrderInternal(OrderPointer order);
+    bool   CanMatch     (Side side, Price price) const;
+    bool   CanFullyFill (Side side, Price price, Quantity qty) const;
 
-    bool     CanMatch     (Side side, Price price) const;
-    bool     CanFullyFill (Side side, Price price, Quantity qty) const;
+    Trades MatchOrders  ();
+    Trade  MakeTrade    (OrderPointer bid, OrderPointer ask, Quantity qty);
 
-    Trades   MatchOrders  ();
-    Trade    MakeTrade    (OrderPointer bid, OrderPointer ask, Quantity qty);
-
-    void     UpdateLevelData(Price price, Quantity qty, LevelData::Action action);
-    void     OnOrderAdded      (OrderPointer order);
-    void     OnOrderCancelled  (OrderPointer order);
-    void     OnOrderMatched    (Price price, Quantity qty, bool fullyFilled);
+    void   UpdateLevelData  (Price price, Quantity qty, LevelData::Action action);
+    void   OnOrderAdded     (OrderPointer order);
+    void   OnOrderCancelled (OrderPointer order);
+    void   OnOrderMatched   (Price price, Quantity qty, bool fullyFilled);
 };
