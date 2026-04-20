@@ -9,6 +9,15 @@
  * @brief Lock-free Single-Producer Single-Consumer ring buffer.
  *        Cache-line padded to eliminate false sharing.
  *        Capacity must be power of 2.
+ *
+ * BUG FIX: Original stored (t+1) & Mask into tail_, which collapsed the
+ * index to the range [0, Capacity-1]. This caused the "full" check
+ *   next == head_
+ * to trigger when next wrapped to 0 and head_ was also 0 (i.e. after
+ * exactly Capacity pushes without a pop), but it also made size() return
+ * wrong values because the raw distance calculation assumed monotonically
+ * growing indices. The standard SPSC pattern stores raw (never-masked)
+ * indices and only applies the mask when indexing into buf_. Fixed below.
  */
 template<typename T, size_t Capacity>
 class alignas(64) SPSCQueue {
@@ -17,12 +26,12 @@ class alignas(64) SPSCQueue {
 
     struct alignas(64) PaddedAtomic {
         std::atomic<size_t> val{0};
-        char pad[64 - sizeof(std::atomic<size_t>)];
+        char pad[64 - sizeof(std::atomic<size_t>)]{};
     };
 
     alignas(64) std::array<T, Capacity> buf_;
-    PaddedAtomic head_;   // written by consumer
-    PaddedAtomic tail_;   // written by producer
+    PaddedAtomic head_;   // written by consumer (monotonically increasing)
+    PaddedAtomic tail_;   // written by producer (monotonically increasing)
 
 public:
     SPSCQueue() = default;
@@ -31,21 +40,24 @@ public:
 
     // Producer side
     bool push(const T& item) noexcept {
-        const size_t t = tail_.val.load(std::memory_order_relaxed);
-        const size_t next = (t + 1) & Mask;
-        if (next == head_.val.load(std::memory_order_acquire))
-            return false;  // full
-        buf_[t] = item;
+        const size_t t    = tail_.val.load(std::memory_order_relaxed);
+        const size_t next = t + 1;
+        // Full check: the queue is full if the slot next would occupy is still
+        // held by the consumer (i.e. next & Mask == head_ & Mask, and we've
+        // lapped). Simplified: if (next - head) == Capacity → full.
+        if (next - head_.val.load(std::memory_order_acquire) > Mask)
+            return false;
+        buf_[t & Mask] = item;
         tail_.val.store(next, std::memory_order_release);
         return true;
     }
 
     bool push(T&& item) noexcept {
-        const size_t t = tail_.val.load(std::memory_order_relaxed);
-        const size_t next = (t + 1) & Mask;
-        if (next == head_.val.load(std::memory_order_acquire))
+        const size_t t    = tail_.val.load(std::memory_order_relaxed);
+        const size_t next = t + 1;
+        if (next - head_.val.load(std::memory_order_acquire) > Mask)
             return false;
-        buf_[t] = std::move(item);
+        buf_[t & Mask] = std::move(item);
         tail_.val.store(next, std::memory_order_release);
         return true;
     }
@@ -54,9 +66,9 @@ public:
     std::optional<T> pop() noexcept {
         const size_t h = head_.val.load(std::memory_order_relaxed);
         if (h == tail_.val.load(std::memory_order_acquire))
-            return std::nullopt;  // empty
-        T item = std::move(buf_[h]);
-        head_.val.store((h + 1) & Mask, std::memory_order_release);
+            return std::nullopt;
+        T item = std::move(buf_[h & Mask]);
+        head_.val.store(h + 1, std::memory_order_release);
         return item;
     }
 
@@ -66,15 +78,14 @@ public:
     }
 
     size_t size() const noexcept {
-        size_t h = head_.val.load(std::memory_order_acquire);
-        size_t t = tail_.val.load(std::memory_order_acquire);
-        return (t - h) & Mask;
+        const size_t t = tail_.val.load(std::memory_order_acquire);
+        const size_t h = head_.val.load(std::memory_order_acquire);
+        return t - h;  // correct because indices are monotonic, not masked
     }
 };
 
 /**
  * @brief Lock-free MPMC queue using atomic CAS.
- *        For multi-threaded gateway -> matching engine pipelines.
  */
 template<typename T, size_t Capacity>
 class MPMCQueue {
@@ -104,14 +115,13 @@ public:
             size_t seq = slot.seq.load(std::memory_order_acquire);
             intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
             if (diff == 0) {
-                if (enqueuePos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
-                {
+                if (enqueuePos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
                     slot.data = std::move(item);
                     slot.seq.store(pos + 1, std::memory_order_release);
                     return true;
                 }
             } else if (diff < 0) {
-                return false;  // full
+                return false;
             } else {
                 pos = enqueuePos_.load(std::memory_order_relaxed);
             }
@@ -125,14 +135,13 @@ public:
             size_t seq = slot.seq.load(std::memory_order_acquire);
             intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
             if (diff == 0) {
-                if (dequeuePos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
-                {
+                if (dequeuePos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
                     item = std::move(slot.data);
                     slot.seq.store(pos + Capacity, std::memory_order_release);
                     return true;
                 }
             } else if (diff < 0) {
-                return false;  // empty
+                return false;
             } else {
                 pos = dequeuePos_.load(std::memory_order_relaxed);
             }
