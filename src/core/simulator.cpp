@@ -14,7 +14,7 @@ void ExchangeSimulator::add_symbol(const std::string& symbol) {
     if (books_.count(symbol)) return;
     auto book = std::make_unique<OrderBook>(symbol);
     book->set_trade_callback([this](const Trade& t) {
-        ++total_trades_;
+        total_trades_.fetch_add(1, std::memory_order_relaxed);
         if (trade_cb_) trade_cb_(t);
     });
     book->set_order_callback([this](const Order& o) {
@@ -23,25 +23,30 @@ void ExchangeSimulator::add_symbol(const std::string& symbol) {
     books_[symbol] = std::move(book);
 }
 
-ExchangeSimulator::SubmitResult ExchangeSimulator::submit_order(Order& order, double market_price) {
+// Fix: Now takes const Order& and safely clones it to guarantee memory persistence
+ExchangeSimulator::SubmitResult ExchangeSimulator::submit_order(const Order& order_in, double market_price) {
     int64_t t0 = now_ns();
-    ++total_orders_;
+    total_orders_.fetch_add(1, std::memory_order_relaxed);
 
-    auto risk_result = risk_.check_order(order, market_price);
+    auto risk_result = risk_.check_order(order_in, market_price);
     if (!risk_result.approved) {
-        ++total_rejects_;
-        order.status = OrderStatus::REJECTED;
+        total_rejects_.fetch_add(1, std::memory_order_relaxed);
         return {false, risk_result.message, {}};
     }
 
     std::lock_guard<std::mutex> lock(mtx_);
-    auto it = books_.find(order.symbol);
+    auto it = books_.find(order_in.symbol);
     if (it == books_.end()) {
-        ++total_rejects_;
-        return {false, "Unknown symbol: " + order.symbol, {}};
+        total_rejects_.fetch_add(1, std::memory_order_relaxed);
+        return {false, "Unknown symbol: " + order_in.symbol, {}};
     }
 
-    order.timestamp = now_ns();
+    // Fix: Allocate order uniquely so OrderBook holds a stable, valid pointer
+    auto order_ptr = std::make_unique<Order>(order_in);
+    order_ptr->timestamp = now_ns();
+    Order& order = *order_ptr;
+    order_store_[order.id] = std::move(order_ptr);
+
     auto trades = it->second->add_order(order);
 
     for (auto& t : trades) {
@@ -49,6 +54,7 @@ ExchangeSimulator::SubmitResult ExchangeSimulator::submit_order(Order& order, do
         risk_.on_fill(t.symbol, fill_side, t.qty, from_price(t.price));
     }
 
+    // Fix: Recorded inside the mutex scope to prevent vector corruption
     order_lat_.record(now_ns() - t0);
 
     return {true, "OK", trades};
@@ -72,6 +78,7 @@ bool ExchangeSimulator::modify_order(const std::string& symbol, OrderId id,
 void ExchangeSimulator::on_tick(const MarketDataTick& tick) {
     int64_t t0 = now_ns();
     risk_.update_market_price(tick.symbol, from_price(tick.last_price));
+    std::lock_guard<std::mutex> lock(mtx_); // Fix: Added lock for latency stats protection
     tick_lat_.record(now_ns() - t0);
 }
 
