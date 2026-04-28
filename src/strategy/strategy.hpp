@@ -9,13 +9,12 @@
 
 namespace hft {
 
-// Strategy plug-in interface — implement this to plug into the backtester
 struct StrategySignal {
     enum class Action { NONE, BUY, SELL, CANCEL, CANCEL_ALL } action = Action::NONE;
     std::string symbol;
-    OrderType   type  = OrderType::LIMIT;
-    Price       price = 0;
-    Quantity    qty   = 0;
+    OrderType   type      = OrderType::LIMIT;
+    Price       price     = 0;
+    Quantity    qty       = 0;
     OrderId     cancel_id = 0;
     std::string reason;
 };
@@ -24,26 +23,14 @@ class IStrategy {
 public:
     virtual ~IStrategy() = default;
     virtual std::string name() const = 0;
-
-    // Called once before replay starts
     virtual void on_init(const std::string& symbol) { (void)symbol; }
-
-    // Called on every market data tick — return signals to execute
     virtual std::vector<StrategySignal> on_tick(const MarketDataTick& tick,
                                                  const OrderBookSnapshot& book) = 0;
-
-    // Called when our order is filled/cancelled/etc.
     virtual void on_order_update(const Order& order) { (void)order; }
-
-    // Called on each trade (our or others')
-    virtual void on_trade(const Trade& trade) { (void)trade; }
-
-    // End of replay stats
-    virtual std::string summary() const { return ""; }
+    virtual void on_trade(const Trade& trade)         { (void)trade; }
+    virtual std::string summary() const               { return ""; }
 };
 
-// ─── Strategy 1: Naive Market Making ─────────────────────────────────────────
-// Posts bid/ask around mid, cancels and re-quotes on each tick
 class MarketMakingStrategy : public IStrategy {
 public:
     explicit MarketMakingStrategy(double spread_bps = 5.0, Quantity qty = 100)
@@ -59,13 +46,21 @@ public:
         double mid  = from_price(book.mid());
         double half = mid * spread_bps_ / 20000.0;
 
-        // Cancel existing quotes
-        if (bid_id_ || ask_id_) {
-            if (bid_id_) { StrategySignal s; s.action = StrategySignal::Action::CANCEL; s.cancel_id = bid_id_; sigs.push_back(s); bid_id_ = 0; }
-            if (ask_id_) { StrategySignal s; s.action = StrategySignal::Action::CANCEL; s.cancel_id = ask_id_; sigs.push_back(s); ask_id_ = 0; }
+        if (bid_id_) {
+            StrategySignal s;
+            s.action    = StrategySignal::Action::CANCEL;
+            s.cancel_id = bid_id_;
+            sigs.push_back(s);
+            bid_id_ = 0;
+        }
+        if (ask_id_) {
+            StrategySignal s;
+            s.action    = StrategySignal::Action::CANCEL;
+            s.cancel_id = ask_id_;
+            sigs.push_back(s);
+            ask_id_ = 0;
         }
 
-        // Post new quotes
         StrategySignal buy;
         buy.action = StrategySignal::Action::BUY;
         buy.symbol = tick.symbol;
@@ -88,14 +83,21 @@ public:
     }
 
     void on_order_update(const Order& order) override {
+        if (order.status == OrderStatus::REJECTED ||
+            order.status == OrderStatus::CANCELLED ||
+            order.status == OrderStatus::EXPIRED) {
+            if (order.id == bid_id_) bid_id_ = 0;
+            if (order.id == ask_id_) ask_id_ = 0;
+            return;
+        }
         if (order.status == OrderStatus::NEW) {
             if (order.side == Side::BUY)  bid_id_ = order.id;
             if (order.side == Side::SELL) ask_id_ = order.id;
         }
         if (order.status == OrderStatus::FILLED) {
-            fills_++;
-            if (order.side == Side::BUY)  bid_id_ = 0;
-            if (order.side == Side::SELL) ask_id_ = 0;
+            ++fills_;
+            if (order.id == bid_id_) bid_id_ = 0;
+            if (order.id == ask_id_) ask_id_ = 0;
         }
     }
 
@@ -111,7 +113,6 @@ private:
     int      fills_  = 0;
 };
 
-// ─── Strategy 2: Momentum / VWAP trend follower ───────────────────────────────
 class MomentumStrategy : public IStrategy {
 public:
     explicit MomentumStrategy(int lookback = 20, Quantity qty = 200)
@@ -127,10 +128,11 @@ public:
         if ((int)prices_.size() > lookback_ * 2) prices_.pop_front();
         if ((int)prices_.size() < lookback_) return sigs;
 
-        double fast = 0, slow = 0;
         int n = (int)prices_.size();
-        for (int i = n - lookback_/2; i < n; ++i) fast += prices_[i];
-        fast /= (lookback_ / 2);
+        double fast = 0, slow = 0;
+        int fast_n = lookback_ / 2;
+        for (int i = n - fast_n; i < n; ++i) fast += prices_[i];
+        fast /= fast_n;
         for (int i = n - lookback_; i < n; ++i) slow += prices_[i];
         slow /= lookback_;
 
@@ -143,6 +145,7 @@ public:
             s.reason = "MOMENTUM_LONG";
             sigs.push_back(s);
             long_ = true;
+            ++signals_;
         } else if (fast < slow * 0.9998 && long_) {
             StrategySignal s;
             s.action = StrategySignal::Action::SELL;
@@ -152,6 +155,7 @@ public:
             s.reason = "MOMENTUM_FLAT";
             sigs.push_back(s);
             long_ = false;
+            ++signals_;
         }
         return sigs;
     }
@@ -168,7 +172,6 @@ private:
     int  signals_ = 0;
 };
 
-// ─── Strategy 3: Statistical Arbitrage Mean Reversion ─────────────────────────
 class MeanReversionStrategy : public IStrategy {
 public:
     explicit MeanReversionStrategy(int window = 30, double z_entry = 2.0, Quantity qty = 100)
@@ -202,7 +205,7 @@ public:
             s.type   = OrderType::LIMIT;
             s.price  = tick.ask_price;
             s.qty    = qty_;
-            s.reason = "MR_LONG z=" + std::to_string(z).substr(0,6);
+            s.reason = "MR_LONG z=" + std::to_string(z).substr(0, 6);
             sigs.push_back(s);
             in_trade_ = true;
         } else if (z > z_entry_ && !in_trade_) {
@@ -212,7 +215,7 @@ public:
             s.type   = OrderType::LIMIT;
             s.price  = tick.bid_price;
             s.qty    = qty_;
-            s.reason = "MR_SHORT z=" + std::to_string(z).substr(0,6);
+            s.reason = "MR_SHORT z=" + std::to_string(z).substr(0, 6);
             sigs.push_back(s);
             in_trade_ = true;
         } else if (std::abs(z) < 0.3 && in_trade_) {
@@ -226,8 +229,8 @@ public:
     }
 
 private:
-    int window_;
-    double z_entry_;
+    int      window_;
+    double   z_entry_;
     Quantity qty_;
     std::deque<double> buf_;
     bool in_trade_ = false;
