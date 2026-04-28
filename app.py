@@ -17,8 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-# ── Engine process wrapper ────────────────────────────────────────────────────
 ENGINE_PATH = Path(__file__).parent / "build" / "hft_engine"
+ENGINE_TIMEOUT = 10.0
 
 class EngineProcess:
     def __init__(self):
@@ -44,10 +44,22 @@ class EngineProcess:
             try:
                 self.proc.stdin.write(line)
                 self.proc.stdin.flush()
+
+                self.proc.stdout._sock if hasattr(self.proc.stdout, '_sock') else None
+                import select
+                ready, _, _ = select.select([self.proc.stdout], [], [], ENGINE_TIMEOUT)
+                if not ready:
+                    self.proc.kill()
+                    self._start()
+                    raise HTTPException(504, "Engine timeout — restarted")
+
                 response = self.proc.stdout.readline().strip()
+                if not response:
+                    raise HTTPException(500, "Engine returned empty response")
                 return json.loads(response)
+            except HTTPException:
+                raise
             except Exception as e:
-                # Restart engine if it dies
                 try:
                     self.proc.kill()
                 except Exception:
@@ -57,7 +69,6 @@ class EngineProcess:
 
 engine = EngineProcess()
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="HFT Exchange Simulator", version="1.0.0")
 
 app.add_middleware(
@@ -67,11 +78,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Pydantic models ───────────────────────────────────────────────────────────
 class OrderRequest(BaseModel):
     symbol: str = "AAPL"
-    side: str = "BUY"          # BUY | SELL
-    type: str = "LIMIT"        # LIMIT | MARKET | IOC | FOK
+    side: str = "BUY"
+    type: str = "LIMIT"
     price: float = 0.0
     qty: int = 100
     client_id: str = ""
@@ -85,7 +95,7 @@ class FeedStepRequest(BaseModel):
     n: int = 10
 
 class BacktestRequest(BaseModel):
-    strategy: str = "MarketMaking"  # MarketMaking | Momentum | MeanReversion
+    strategy: str = "MarketMaking"
     symbol: str = "AAPL"
     ticks: int = 5000
     start_price: float = 185.0
@@ -96,7 +106,6 @@ class RiskLimitsRequest(BaseModel):
     max_notional_usd: float = 50_000_000.0
     max_orders_per_sec: int = 2000
 
-# ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/api/status")
 def status():
     return engine.send("status")
@@ -135,8 +144,7 @@ def feed_step(req: FeedStepRequest):
 
 @app.post("/api/backtest")
 def backtest(req: BacktestRequest):
-    result = engine.send("backtest", req.model_dump())
-    return result
+    return engine.send("backtest", req.model_dump())
 
 @app.get("/api/risk/limits")
 def get_limits():
@@ -150,7 +158,6 @@ def set_limits(req: RiskLimitsRequest):
 def reset():
     return engine.send("reset")
 
-# ── Serve frontend ────────────────────────────────────────────────────────────
 @app.get("/")
 def serve_index():
     return FileResponse(str(Path(__file__).parent / "index.html"))
