@@ -17,6 +17,9 @@ int RiskManager::orders_in_last_second() {
 RiskResult RiskManager::check_order(const Order& order, double current_price) {
     std::lock_guard<std::mutex> lock(mtx_);
     ++stats_checked_;
+    
+    // Fix: Moved to track bandwidth uniformly, preventing rogue strategies from spamming without penalty.
+    order_timestamps_ns_.push_back(now_ns()); 
 
     if (!limits_.enabled) return {true, RiskRejectReason::NONE, "OK"};
 
@@ -44,11 +47,10 @@ RiskResult RiskManager::check_order(const Order& order, double current_price) {
             "Projected position " + std::to_string(projected) + " > limit " + std::to_string(limits_.max_position)});
 
     int rate = orders_in_last_second();
-    if (rate >= limits_.max_orders_per_sec)
+    if (rate > limits_.max_orders_per_sec) // Tracked above, modified greater than strictly
         return (++stats_rejected_, RiskResult{false, RiskRejectReason::MAX_ORDER_RATE,
             "Order rate " + std::to_string(rate) + "/s > limit " + std::to_string(limits_.max_orders_per_sec)});
 
-    order_timestamps_ns_.push_back(now_ns());
     return {true, RiskRejectReason::NONE, "OK"};
 }
 
