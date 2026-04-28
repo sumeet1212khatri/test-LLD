@@ -12,13 +12,13 @@ void OrderBook::notify_order(const Order& o) {
 
 Trade OrderBook::make_trade(Order& buy, Order& sell, Price px, Quantity qty) {
     Trade t;
-    t.trade_id    = next_trade_id_++;
+    t.trade_id      = next_trade_id_++;
     t.buy_order_id  = buy.id;
     t.sell_order_id = sell.id;
-    t.symbol      = symbol_;
-    t.price       = px;
-    t.qty         = qty;
-    t.timestamp   = now_ns();
+    t.symbol        = symbol_;
+    t.price         = px;
+    t.qty           = qty;
+    t.timestamp     = now_ns();
 
     buy.filled_qty  += qty;
     sell.filled_qty += qty;
@@ -28,10 +28,11 @@ Trade OrderBook::make_trade(Order& buy, Order& sell, Price px, Quantity qty) {
 }
 
 void OrderBook::add_to_book(Order& order) {
-    auto& book = (order.side == Side::BUY) ? bids_ : asks_;
+    auto& book  = (order.side == Side::BUY) ? bids_ : asks_;
     auto& level = book[order.price];
     level.price = order.price;
-    level.add(&order);
+    level.orders.push_back(&order);
+    level.total_qty += order.remaining();
     orders_[order.id] = &order;
 }
 
@@ -39,9 +40,17 @@ void OrderBook::remove_from_book(Order& order) {
     auto& book = (order.side == Side::BUY) ? bids_ : asks_;
     auto it = book.find(order.price);
     if (it == book.end()) return;
+
     auto& level = it->second;
-    level.orders.remove_if([&](Order* o){ return o->id == order.id; });
-    level.total_qty -= order.remaining();
+    Quantity removed = 0;
+    level.orders.remove_if([&](Order* o) {
+        if (o->id == order.id) {
+            removed = o->remaining();
+            return true;
+        }
+        return false;
+    });
+    level.total_qty -= removed;
     if (level.empty()) book.erase(it);
     orders_.erase(order.id);
 }
@@ -49,7 +58,6 @@ void OrderBook::remove_from_book(Order& order) {
 std::vector<Trade> OrderBook::try_match(Order& incoming, bool fok_check) {
     std::vector<Trade> trades;
 
-    // For FOK: first check if full qty can be matched
     if (fok_check) {
         Quantity available = 0;
         if (incoming.side == Side::BUY) {
@@ -72,24 +80,18 @@ std::vector<Trade> OrderBook::try_match(Order& incoming, bool fok_check) {
         }
     }
 
-    auto match_against = [&](auto& book_side, auto begin, auto end) {
-        for (auto it = begin; it != end && incoming.remaining() > 0; ) {
+    if (incoming.side == Side::BUY) {
+        for (auto it = asks_.begin(); it != asks_.end() && incoming.remaining() > 0; ) {
             auto& [px, level] = *it;
-            // price check for limit orders
             if (incoming.type == OrderType::LIMIT || incoming.type == OrderType::IOC) {
-                if (incoming.side == Side::BUY  && px > incoming.price) break;
-                if (incoming.side == Side::SELL && px < incoming.price) break;
+                if (px > incoming.price) break;
             }
-
             while (!level.orders.empty() && incoming.remaining() > 0) {
-                Order* resting = level.orders.front();
+                Order* resting   = level.orders.front();
                 Quantity fill_qty = std::min(incoming.remaining(), resting->remaining());
-                Price fill_px = resting->price; // resting order price priority
+                Price    fill_px  = resting->price;
 
-                auto trade = make_trade(
-                    incoming.side == Side::BUY ? incoming : *resting,
-                    incoming.side == Side::BUY ? *resting : incoming,
-                    fill_px, fill_qty);
+                auto trade = make_trade(incoming, *resting, fill_px, fill_qty);
                 trades.push_back(trade);
                 if (trade_cb_) trade_cb_(trade);
 
@@ -103,17 +105,12 @@ std::vector<Trade> OrderBook::try_match(Order& incoming, bool fok_check) {
                 }
             }
             if (level.empty()) {
-                it = book_side.erase(it);
+                it = asks_.erase(it);
             } else {
                 ++it;
             }
         }
-    };
-
-    if (incoming.side == Side::BUY) {
-        match_against(asks_, asks_.begin(), asks_.end());
     } else {
-        // iterate bids in descending order
         for (auto it = bids_.end(); it != bids_.begin() && incoming.remaining() > 0; ) {
             --it;
             auto& [px, level] = *it;
@@ -121,9 +118,9 @@ std::vector<Trade> OrderBook::try_match(Order& incoming, bool fok_check) {
                 if (px < incoming.price) break;
             }
             while (!level.orders.empty() && incoming.remaining() > 0) {
-                Order* resting = level.orders.front();
+                Order* resting   = level.orders.front();
                 Quantity fill_qty = std::min(incoming.remaining(), resting->remaining());
-                Price fill_px = resting->price;
+                Price    fill_px  = resting->price;
 
                 auto trade = make_trade(*resting, incoming, fill_px, fill_qty);
                 trades.push_back(trade);
@@ -136,7 +133,10 @@ std::vector<Trade> OrderBook::try_match(Order& incoming, bool fok_check) {
                 if (resting->is_done()) {
                     level.orders.pop_front();
                     orders_.erase(resting->id);
-                    if (level.empty()) { it = bids_.erase(it); break; }
+                    if (level.empty()) {
+                        it = bids_.erase(it);
+                        break;
+                    }
                 }
             }
         }
@@ -159,7 +159,7 @@ std::vector<Trade> OrderBook::add_order(Order& order) {
         case OrderType::MARKET: {
             trades = try_match(order);
             if (order.remaining() > 0) {
-                order.status = OrderStatus::CANCELLED; // unfilled market = cancel
+                order.status = OrderStatus::CANCELLED;
                 notify_order(order);
             }
             break;
@@ -195,7 +195,6 @@ bool OrderBook::modify_order(OrderId id, Price new_price, Quantity new_qty) {
     if (it == orders_.end()) return false;
     Order* o = it->second;
     if (new_qty <= o->filled_qty) return false;
-
     remove_from_book(*o);
     o->price = new_price;
     o->qty   = new_qty;
@@ -214,22 +213,20 @@ OrderBookSnapshot OrderBook::snapshot(int depth) const {
     snap.symbol    = symbol_;
     snap.timestamp = now_ns();
 
-    // Bids: iterate descending
     int cnt = 0;
     for (auto it = bids_.rbegin(); it != bids_.rend() && cnt < depth; ++it, ++cnt) {
         L2Level l;
-        l.price = it->first;
-        l.qty   = it->second.total_qty;
+        l.price       = it->first;
+        l.qty         = it->second.total_qty;
         l.order_count = (int)it->second.orders.size();
         snap.bids.push_back(l);
     }
 
-    // Asks: iterate ascending
     cnt = 0;
     for (auto it = asks_.begin(); it != asks_.end() && cnt < depth; ++it, ++cnt) {
         L2Level l;
-        l.price = it->first;
-        l.qty   = it->second.total_qty;
+        l.price       = it->first;
+        l.qty         = it->second.total_qty;
         l.order_count = (int)it->second.orders.size();
         snap.asks.push_back(l);
     }
