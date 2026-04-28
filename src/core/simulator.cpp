@@ -6,8 +6,6 @@
 
 namespace hft {
 
-// ─── ExchangeSimulator ────────────────────────────────────────────────────────
-
 ExchangeSimulator::ExchangeSimulator(RiskLimits limits)
     : risk_(limits), journal_("session.journal") {}
 
@@ -17,11 +15,6 @@ void ExchangeSimulator::add_symbol(const std::string& symbol) {
     auto book = std::make_unique<OrderBook>(symbol);
     book->set_trade_callback([this](const Trade& t) {
         ++total_trades_;
-        tick_lat_; // no-op marker
-        risk_.on_fill(t.symbol,
-            // determine side from buy/sell order
-            Side::BUY,   // simplified: risk tracked separately
-            t.qty, from_price(t.price));
         if (trade_cb_) trade_cb_(t);
     });
     book->set_order_callback([this](const Order& o) {
@@ -51,13 +44,12 @@ ExchangeSimulator::SubmitResult ExchangeSimulator::submit_order(Order& order, do
     order.timestamp = now_ns();
     auto trades = it->second->add_order(order);
 
-    // Update positions for each trade
     for (auto& t : trades) {
-        risk_.on_fill(t.symbol, order.side, t.qty, from_price(t.price));
+        Side fill_side = (t.buy_order_id == order.id) ? Side::BUY : Side::SELL;
+        risk_.on_fill(t.symbol, fill_side, t.qty, from_price(t.price));
     }
 
-    int64_t elapsed = now_ns() - t0;
-    order_lat_.record(elapsed);
+    order_lat_.record(now_ns() - t0);
 
     return {true, "OK", trades};
 }
@@ -107,8 +99,6 @@ std::unordered_map<std::string, Position> ExchangeSimulator::all_positions() con
 double ExchangeSimulator::total_pnl() const {
     return risk_.total_pnl();
 }
-
-// ─── Backtester ───────────────────────────────────────────────────────────────
 
 Backtester::Backtester(RiskLimits limits) : limits_(limits) {}
 
@@ -176,12 +166,15 @@ BacktestResult Backtester::run(const std::vector<MarketDataTick>& ticks,
     sim_ = std::make_unique<ExchangeSimulator>(limits_);
     for (auto& sym : symbols_) sim_->add_symbol(sym);
     if (symbols_.empty() && !ticks.empty()) {
-        // auto-detect
         std::unordered_map<std::string, bool> seen;
-        for (auto& t : ticks) if (!seen[t.symbol]) { sim_->add_symbol(t.symbol); seen[t.symbol] = true; }
+        for (auto& t : ticks) {
+            if (!seen[t.symbol]) {
+                sim_->add_symbol(t.symbol);
+                seen[t.symbol] = true;
+            }
+        }
     }
 
-    // Init strategies
     std::unordered_set<std::string> inited;
     for (auto& tick : ticks) {
         if (!inited.count(tick.symbol)) {
@@ -191,8 +184,7 @@ BacktestResult Backtester::run(const std::vector<MarketDataTick>& ticks,
     }
 
     std::unordered_map<OrderId, Order> live_orders;
-    double peak_equity = 0;
-    double equity      = 0;
+    double peak_equity = std::numeric_limits<double>::lowest();
     int64_t ts_start   = now_ns();
 
     for (auto& tick : ticks) {
@@ -204,21 +196,22 @@ BacktestResult Backtester::run(const std::vector<MarketDataTick>& ticks,
 
         process_signals(sigs, tick, result, live_orders);
 
-        // Track equity curve (sampled every 100 ticks)
         if (result.ticks_processed % 100 == 0) {
-            equity = sim_->total_pnl();
+            double equity = sim_->total_pnl();
             result.equity_curve.push_back(equity);
             if (equity > peak_equity) peak_equity = equity;
-            double drawdown = peak_equity - equity;
-            if (drawdown > result.max_drawdown) result.max_drawdown = drawdown;
+            if (peak_equity > std::numeric_limits<double>::lowest()) {
+                double drawdown = peak_equity - equity;
+                if (drawdown > result.max_drawdown) result.max_drawdown = drawdown;
+            }
         }
 
         result.tick_latency.record(now_ns() - t0);
         ++result.ticks_processed;
     }
 
-    int64_t elapsed_ns = now_ns() - ts_start;
-    result.total_pnl     = sim_->total_pnl();
+    int64_t elapsed_ns  = now_ns() - ts_start;
+    result.total_pnl    = sim_->total_pnl();
 
     auto pos = sim_->all_positions();
     for (auto& [sym, p] : pos) {
@@ -230,16 +223,16 @@ BacktestResult Backtester::run(const std::vector<MarketDataTick>& ticks,
     result.order_latency.compute_percentiles();
     result.tick_latency.compute_percentiles();
 
-    double elapsed_s = elapsed_ns / 1e9;
-    result.throughput_eps = elapsed_s > 0 ? result.ticks_processed / elapsed_s : 0;
+    double elapsed_s       = elapsed_ns / 1e9;
+    result.throughput_eps  = elapsed_s > 0 ? result.ticks_processed / elapsed_s : 0;
 
-    // Simplified Sharpe from equity curve
     if (result.equity_curve.size() > 2) {
         std::vector<double> returns;
+        returns.reserve(result.equity_curve.size() - 1);
         for (size_t i = 1; i < result.equity_curve.size(); ++i)
-            returns.push_back(result.equity_curve[i] - result.equity_curve[i-1]);
+            returns.push_back(result.equity_curve[i] - result.equity_curve[i - 1]);
         double mean = std::accumulate(returns.begin(), returns.end(), 0.0) / returns.size();
-        double var = 0;
+        double var  = 0;
         for (double r : returns) var += (r - mean) * (r - mean);
         double std_dev = std::sqrt(var / returns.size());
         result.sharpe = (std_dev > 1e-9) ? (mean / std_dev * std::sqrt(252.0)) : 0;
