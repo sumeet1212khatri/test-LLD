@@ -29,7 +29,7 @@ struct Order {
     std::string symbol;
     Side       side       = Side::BUY;
     OrderType  type       = OrderType::LIMIT;
-    Price      price      = 0;      // 0 for market orders
+    Price      price      = 0;      
     Quantity   qty        = 0;
     Quantity   filled_qty = 0;
     OrderStatus status    = OrderStatus::PENDING;
@@ -75,8 +75,8 @@ struct L2Level {
 struct OrderBookSnapshot {
     std::string symbol;
     Timestamp   timestamp;
-    std::vector<L2Level> bids; // sorted desc
-    std::vector<L2Level> asks; // sorted asc
+    std::vector<L2Level> bids; 
+    std::vector<L2Level> asks; 
     Price best_bid() const { return bids.empty() ? 0 : bids[0].price; }
     Price best_ask() const { return asks.empty() ? 0 : asks[0].price; }
     Price mid()      const {
@@ -98,7 +98,7 @@ struct RiskLimits {
 
 struct Position {
     std::string symbol;
-    Quantity    net_qty   = 0;  // positive=long, negative=short
+    Quantity    net_qty   = 0;  
     double      avg_price = 0.0;
     double      realized_pnl  = 0.0;
     double      unrealized_pnl = 0.0;
@@ -112,7 +112,7 @@ struct LatencyStats {
     int64_t max_ns  = 0;
     int64_t p50_ns  = 0;
     int64_t p99_ns  = 0;
-    std::vector<int64_t> samples; // for percentile calc
+    std::vector<int64_t> samples; 
 
     void record(int64_t ns) {
         ++count; sum_ns += ns;
@@ -122,9 +122,10 @@ struct LatencyStats {
     }
     void compute_percentiles() {
         if (samples.empty()) return;
-        std::sort(samples.begin(), samples.end());
-        p50_ns = samples[samples.size() * 50 / 100];
-        p99_ns = samples[samples.size() * 99 / 100];
+        std::vector<int64_t> sorted = samples; // Fix: Copy before sort
+        std::sort(sorted.begin(), sorted.end());
+        p50_ns = sorted[sorted.size() * 50 / 100];
+        p99_ns = sorted[sorted.size() * 99 / 100];
     }
     double avg_us() const { return count ? (double)sum_ns / count / 1000.0 : 0; }
 };
