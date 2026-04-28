@@ -27,7 +27,7 @@ struct BacktestResult {
     double      sharpe             = 0;
     LatencyStats order_latency;
     LatencyStats tick_latency;
-    double      throughput_eps     = 0; // events per second
+    double      throughput_eps     = 0; 
     std::vector<double> equity_curve;
     std::vector<Trade>  trades;
 };
@@ -36,49 +36,44 @@ class ExchangeSimulator {
 public:
     explicit ExchangeSimulator(RiskLimits limits = {});
 
-    // Add a symbol to trade
     void add_symbol(const std::string& symbol);
 
-    // Submit order → goes through risk → matching engine
-    // Returns {approved, reject_reason, trades}
     struct SubmitResult {
         bool   approved;
         std::string reject_reason;
         std::vector<Trade> trades;
     };
-    SubmitResult submit_order(Order& order, double market_price = 0.0);
+    
+    // Fix: Takes const reference to avoid scope expiration
+    SubmitResult submit_order(const Order& order, double market_price = 0.0);
+    
     bool cancel_order(const std::string& symbol, OrderId id);
     bool modify_order(const std::string& symbol, OrderId id, Price new_price, Quantity new_qty);
-
-    // Feed a market data tick
     void on_tick(const MarketDataTick& tick);
 
-    // Snapshot
     OrderBookSnapshot get_snapshot(const std::string& symbol, int depth = 10) const;
     std::vector<std::string> symbols() const;
 
-    // State
     Position get_position(const std::string& symbol) const;
     std::unordered_map<std::string, Position> all_positions() const;
     double total_pnl() const;
     RiskManager& risk() { return risk_; }
 
-    // Callbacks
     void set_trade_callback(TradeCallback cb)  { trade_cb_ = std::move(cb); }
     void set_order_callback(OrderCallback cb)  { order_cb_ = std::move(cb); }
 
-    // Stats
     LatencyStats& order_latency() { return order_lat_; }
     LatencyStats& tick_latency()  { return tick_lat_; }
-    int64_t total_orders()  const { return total_orders_; }
-    int64_t total_trades()  const { return total_trades_; }
-    int64_t total_rejects() const { return total_rejects_; }
+    int64_t total_orders()  const { return total_orders_.load(std::memory_order_relaxed); }
+    int64_t total_trades()  const { return total_trades_.load(std::memory_order_relaxed); }
+    int64_t total_rejects() const { return total_rejects_.load(std::memory_order_relaxed); }
 
     OrderId next_order_id() { return ++next_oid_; }
 
 private:
     std::unordered_map<std::string, std::unique_ptr<OrderBook>> books_;
-    std::unordered_map<std::string, Order> order_store_; // owns all orders
+    // Fix: Correct key type and properly controls memory lifetime
+    std::unordered_map<OrderId, std::unique_ptr<Order>> order_store_; 
     RiskManager risk_;
     BinaryJournal journal_;
     mutable std::mutex mtx_;
@@ -88,12 +83,13 @@ private:
 
     std::atomic<OrderId> next_oid_{1000};
     LatencyStats order_lat_, tick_lat_;
-    int64_t total_orders_  = 0;
-    int64_t total_trades_  = 0;
-    int64_t total_rejects_ = 0;
+    
+    // Fix: Atomic counters for thread-safe operations in main.cpp
+    std::atomic<int64_t> total_orders_{0};
+    std::atomic<int64_t> total_trades_{0};
+    std::atomic<int64_t> total_rejects_{0};
 };
 
-// ─── Backtester ───────────────────────────────────────────────────────────────
 class Backtester {
 public:
     explicit Backtester(RiskLimits limits = {});
@@ -105,7 +101,6 @@ public:
                        bool enable_journal = true,
                        const std::string& journal_path = "replay.journal");
 
-    // Replay a previously recorded journal
     BacktestResult replay_journal(const std::string& path);
 
 private:
